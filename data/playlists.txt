@@ -1,0 +1,5 @@
+# M3U-Playlists, eine pro Zeile:   Name|URL
+# Lokale Datei (liegt in ux0:data/VitaStream/):   Name|file:meine_liste.m3u
+#
+# Beispiel: frei empfangbare deutsche TV-Sender aus dem iptv-org-Projekt
+Deutsche Free-TV-Sender (iptv-org)|https://iptv-org.github.io/iptv/countries/de.m3u

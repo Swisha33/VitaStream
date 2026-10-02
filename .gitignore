@@ -1,0 +1,9 @@
+build/
+tests/run/
+tests/lua/
+tests/test_adblock
+tests/test_dns
+tests/test_plugins
+*.vpk
+*.self
+*.velf

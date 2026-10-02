@@ -1,0 +1,16 @@
+# Eigene Websites als Quellen. Jeder [Abschnitt] erscheint als eigene Quelle.
+# Muster sind Lua-Patterns. Ausfuehrliche Erklaerung: README.md, "Eigene Websites".
+# Entferne die '#' vor einem Block, um ihn zu aktivieren.
+#
+#[Mein Heimserver]
+#description = Videos aus dem eigenen Webordner
+#start   = http://192.168.1.20:8080/videos/
+#item    = <a href="([^"]+%.mp4)">([^<]+)</a>
+#
+#[Beispielseite mit Suche]
+#start   = https://example.org/neu
+#search  = https://example.org/suche?q={q}
+#item    = <a class="video" href="([^"]+)"[^>]*>(.-)</a>
+#embed   = <iframe[^>]+src="([^"]+)"
+#stream  = (https?://[^"'%s]+%.m3u8[^"'%s]*)
+#referer = https://example.org/

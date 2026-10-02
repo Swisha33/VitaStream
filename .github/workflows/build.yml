@@ -1,0 +1,34 @@
+name: Build VPK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lua 5.4 bauen
+        run: |
+          git clone --depth 1 -b v5.4.6 https://github.com/lua/lua tests/lua
+          make -C tests/lua -s CFLAGS="-O2 -DLUA_USE_LINUX" MYLIBS="-ldl"
+      - name: Tests (Blockliste, DNS, Plugins)
+        run: LUA_SRC=./lua tests/run_tests.sh
+
+  vita:
+    runs-on: ubuntu-latest
+    container: vitasdk/vitasdk:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fehlende Pakete nachinstallieren
+        run: vdpm lua curl openssl zlib libvita2d libpng libjpeg-turbo || true
+      - name: Bauen
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j$(nproc)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VitaStream-vpk
+          path: build/VitaStream.vpk

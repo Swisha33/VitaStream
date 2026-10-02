@@ -1,0 +1,70 @@
+# VitaStream Blockliste
+# Gesperrt wird jede Domain inklusive aller Subdomains.
+# Erlaubte Formate:
+#   example.com
+#   0.0.0.0 example.com        (hosts-Dateien, z. B. StevenBlack)
+#   ||example.com^             (AdGuard-/uBlock-Domainregeln)
+#   @@||example.com^           (Ausnahme)
+# Du kannst komplette hosts- oder AdGuard-DNS-Listen einfach unten anhaengen
+# und in der App unter Einstellungen "Blockliste neu laden" waehlen.
+
+# --- Werbenetzwerke ---
+doubleclick.net
+googlesyndication.com
+googleadservices.com
+adservice.google.com
+pagead2.googlesyndication.com
+googletagservices.com
+adnxs.com
+adsrvr.org
+advertising.com
+amazon-adsystem.com
+criteo.com
+criteo.net
+taboola.com
+outbrain.com
+pubmatic.com
+rubiconproject.com
+openx.net
+casalemedia.com
+smartadserver.com
+adform.net
+yieldlab.net
+media.net
+moatads.com
+33across.com
+sharethrough.com
+teads.tv
+popads.net
+popcash.net
+propellerads.com
+adsterra.com
+exoclick.com
+juicyads.com
+trafficjunky.net
+hilltopads.net
+onclickads.net
+adcash.com
+mgid.com
+revcontent.com
+zedo.com
+bidswitch.net
+# --- Tracker / Analytik ---
+google-analytics.com
+googletagmanager.com
+hotjar.com
+scorecardresearch.com
+quantserve.com
+chartbeat.com
+mixpanel.com
+segment.io
+newrelic.com
+nr-data.net
+facebook.net
+connect.facebook.net
+bat.bing.com
+clarity.ms
+mc.yandex.ru
+adition.com
+ioam.de
+xiti.com
