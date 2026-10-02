@@ -6,7 +6,7 @@ FFMPEG_COMMON_FLAGS=(
   --disable-avdevice --disable-swscale --disable-postproc --disable-avfilter
   --enable-swresample --enable-small --disable-debug --enable-pthreads
   --enable-demuxer=mov,mpegts,aac,mp3
-  --enable-parser=h264,aac,aac_latm,mpegaudio,ac3
+  --enable-parser=h264,hevc,aac,aac_latm,mpegaudio,ac3   # hevc: zieht aom_film_grain.o mit (FFmpeg-7.1-Abhaengigkeit von h2645_sei)
   --enable-decoder=aac,aac_latm,mp3,mp3float,mp2,mp2float,ac3
   --enable-bsf=h264_mp4toannexb
   --enable-protocol=file

@@ -28,8 +28,8 @@ static void set_detail(const char *fmt, const char *a, long b)
 {
     pthread_once(&s_err_once, err_key_init);
     char *buf = pthread_getspecific(s_err_key);
-    if (!buf) { buf = malloc(200); pthread_setspecific(s_err_key, buf); }
-    if (buf) snprintf(buf, 200, fmt, a, b);
+    if (!buf) { buf = malloc(320); pthread_setspecific(s_err_key, buf); }
+    if (buf) snprintf(buf, 320, fmt, a, b);
 }
 
 const char *net_last_detail(void)

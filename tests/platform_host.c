@@ -78,5 +78,3 @@ int aout_write(const int16_t *pcm)
 }
 void aout_close(void) {}
 
-/* Minimal-FFmpeg ohne HEVC/AV1: Symbol wird vom H.264-Decoder referenziert, aber nie gebraucht */
-void ff_aom_uninit_film_grain_params(void *s) { (void)s; }
