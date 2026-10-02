@@ -1,7 +1,9 @@
 #include "ui.h"
+#include "thumbs.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <vita2d.h>
 #include <psp2/ctrl.h>
 #include <psp2/ime_dialog.h>
@@ -73,6 +75,7 @@ void ui_begin(void) { vita2d_start_drawing(); vita2d_clear_screen(); }
 
 void ui_end(void)
 {
+    thumbs_tick();
     vita2d_end_drawing();
     vita2d_common_dialog_update();
     vita2d_swap_buffers();
@@ -154,6 +157,126 @@ void ui_list(int count, int cursor, int *scroll, ListLabelFn fn, void *ctx)
         if (h < 20) h = 20;
         int y = LIST_TOP + (track - h) * *scroll / (count - visible);
         ui_rect(SCREEN_W - 8, y, 4, h, COL_DIM);
+    }
+}
+
+/* ---------- Liste mit Vorschaubildern ---------- */
+
+#define TROW_H 74
+
+int ui_list_thumbs_visible(void) { return (LIST_BOTTOM - LIST_TOP) / TROW_H; }
+
+static uint32_t placeholder_color(const char *s)
+{
+    unsigned h = 2166136261u;
+    for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+    static const uint32_t pal[] = { 0xFF7A4A2E, 0xFF2E7A4A, 0xFF4A2E7A, 0xFF7A2E5E, 0xFF2E5E7A, 0xFF5E7A2E, 0xFF3A3A8A, 0xFF8A5A2A };
+    return pal[h % (sizeof pal / sizeof *pal)];
+}
+
+static void draw_placeholder(int x, int y, int w, int h, const char *title)
+{
+    ui_rect(x, y, w, h, placeholder_color(title));
+    /* Initialen: erste zwei Buchstaben/Ziffern */
+    char ini[8] = {0};
+    int n = 0;
+    for (const unsigned char *p = (const unsigned char *)title; *p && n < 2; p++) {
+        if (*p < 0x80 && isalnum(*p)) ini[n++] = (char)toupper(*p);
+        else if (*p >= 0xC0) {                    /* UTF-8-Zeichen komplett übernehmen */
+            int len = *p >= 0xF0 ? 4 : *p >= 0xE0 ? 3 : 2;
+            if (n + len > 6) break;
+            memcpy(ini + n, p, len);
+            n += len;
+            p += len - 1;
+            break;
+        }
+    }
+    int tw = vita2d_pgf_text_width(s_font, 1.2f, ini);
+    vita2d_pgf_draw_text(s_font, x + (w - tw) / 2, y + h / 2 + 9, 0xDDFFFFFF, 1.2f, ini);
+}
+
+void ui_list_thumbs(int count, int cursor, int *scroll, ListThumbFn fn, void *ctx)
+{
+    int visible = ui_list_thumbs_visible();
+    if (cursor < *scroll) *scroll = cursor;
+    if (cursor >= *scroll + visible) *scroll = cursor - visible + 1;
+    if (*scroll < 0) *scroll = 0;
+    if (count == 0) {
+        ui_text(40, LIST_TOP + 60, COL_DIM, "Keine Eintraege");
+        return;
+    }
+    for (int r = 0; r < visible && *scroll + r < count; r++) {
+        int i = *scroll + r;
+        int y = LIST_TOP + r * TROW_H;
+        if (i == cursor) {
+            ui_rect(10, y, SCREEN_W - 20, TROW_H - 4, COL_SEL);
+            ui_rect(10, y, 4, TROW_H - 4, COL_ACCENT);
+        }
+        const char *t = "", *sub = NULL, *thumb = NULL;
+        fn(ctx, i, &t, &sub, &thumb);
+
+        int bx = 22, by = y + (TROW_H - 4 - THUMB_H) / 2;
+        vita2d_texture *tex = thumb ? thumbs_get(thumb) : NULL;
+        if (tex) {
+            int tw = vita2d_texture_get_width(tex), th = vita2d_texture_get_height(tex);
+            ui_rect(bx, by, THUMB_W, THUMB_H, 0xFF101010);
+            vita2d_draw_texture(tex, bx + (THUMB_W - tw) / 2, by + (THUMB_H - th) / 2);
+        } else {
+            draw_placeholder(bx, by, THUMB_W, THUMB_H, t);
+        }
+
+        int tx = bx + THUMB_W + 14, tmax = SCREEN_W - tx - 30;
+        if (sub && *sub) {
+            ui_text_clipped(tx, y + 30, tmax, COL_TEXT, t);
+            char buf[256];
+            snprintf(buf, sizeof buf, "%s", sub);
+            /* Untertitel ebenfalls kürzen */
+            if (vita2d_pgf_text_width(s_font, 0.8f, buf) > tmax) {
+                int n = (int)strlen(buf);
+                while (n > 0 && vita2d_pgf_text_width(s_font, 0.8f, buf) > tmax - 20) {
+                    do { n--; } while (n > 0 && ((unsigned char)buf[n] & 0xC0) == 0x80);
+                    strcpy(buf + n, "...");
+                }
+            }
+            vita2d_pgf_draw_text(s_font, tx, y + 54, COL_DIM, 0.8f, buf);
+        } else {
+            ui_text_clipped(tx, y + 42, tmax, COL_TEXT, t);
+        }
+    }
+    if (count > visible) {
+        int track = LIST_BOTTOM - LIST_TOP;
+        int h = track * visible / count;
+        if (h < 20) h = 20;
+        int y = LIST_TOP + (track - h) * *scroll / (count - visible);
+        ui_rect(SCREEN_W - 8, y, 4, h, COL_DIM);
+    }
+}
+
+/* ---------- Auswahlmenü ---------- */
+
+typedef struct { const char **opt; } MenuCtx;
+static void menu_label(void *ctx, int i, const char **t, const char **sub)
+{
+    *t = ((MenuCtx *)ctx)->opt[i];
+    *sub = NULL;
+}
+
+int ui_menu(const char *title, const char **options, int count)
+{
+    MenuCtx mc = { options };
+    int cursor = 0, scroll = 0;
+    Input in;
+    for (;;) {
+        ui_poll(&in);
+        if (in.pressed & SCE_CTRL_UP)   cursor = (cursor + count - 1) % count;
+        if (in.pressed & SCE_CTRL_DOWN) cursor = (cursor + 1) % count;
+        if (in.pressed & BTN_ACCEPT) return cursor;
+        if (in.pressed & (BTN_CANCEL | SCE_CTRL_SQUARE)) return -1;
+        ui_begin();
+        ui_header(title, NULL);
+        ui_list(count, cursor, &scroll, menu_label, &mc);
+        ui_footer("Bestaetigen: Auswaehlen   Zurueck: Abbrechen");
+        ui_end();
     }
 }
 

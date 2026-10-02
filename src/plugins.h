@@ -12,16 +12,20 @@
  *     resolve = function(item)  return "https://...m3u8" end -- oder { url=..., headers=... }
  *   }
  *
- * item = { title="...", subtitle="...", id="...", kind="video"|"folder" }
- * folder-Einträge werden mit browse(id) geöffnet, video-Einträge mit resolve(item). */
+ * item = { title="...", subtitle="...", id="...", kind="video"|"folder"|"more", thumb="URL" }
+ * folder-Einträge werden mit browse(id) geöffnet, video-Einträge mit resolve(item).
+ * "more" = "Weitere laden": browse(id) liefert die nächste Seite, die an die Liste angehängt wird.
+ * thumb: Bild-URL (PNG/JPEG) oder "og:<Seiten-URL>" (Vorschaubild der Webseite). */
 
 #define ITEM_VIDEO  0
 #define ITEM_FOLDER 1
+#define ITEM_MORE   2
 
 typedef struct {
     char *title;
     char *subtitle;
     char *id;
+    char *thumb;     /* NULL = Platzhalter */
     int   kind;
     int   ref;       /* Lua-Registry-Referenz auf die Original-Tabelle */
 } PluginItem;
@@ -53,6 +57,8 @@ int     plugins_source_count(void);
 Source *plugins_source(int idx);
 
 void    plugins_list_free(PluginList *l);
+/* Hängt src an dst an (src ist danach leer); entfernt vorher dst->items[remove_index] (-1 = nichts) */
+void    plugins_list_append(PluginList *dst, PluginList *src, int remove_index);
 
 /* ---- asynchrone Aufrufe (Lua läuft in einem Worker-Thread) ---- */
 typedef enum { JOB_IDLE, JOB_RUNNING, JOB_DONE, JOB_ERROR } JobState;

@@ -7,18 +7,17 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
 
 ## Funktionen
 
-- **Quellen-Plugins in Lua** – Suchen, Durchblättern, Abspielen. Neue Quellen = neue `.lua`-Datei, kein Neukompilieren.
+- **Quellen-Plugins in Lua** – Suchen, Durchblättern, Abspielen, mit Vorschaubildern und „Weitere laden“.
 - **Mitgelieferte Quellen**
-  - *Direkte URL* – beliebigen MP4-/HLS-Link oder eine Datei auf `ux0:` abspielen, mit Verlauf
-  - *M3U-Playlists* – IPTV- und eigene Listen inkl. Gruppen, Referer/User-Agent aus `#EXTVLCOPT`
-  - *Mediatheken* – ARD, ZDF, arte, 3sat … über die offene MediathekViewWeb-API
-  - *Eigene Websites* – per Muster in `sites.txt`, ganz ohne Programmieren
-- **AdBlock**
-  - lokale Blockliste (hosts-, AdGuard- und reine Domain-Listen, inkl. Ausnahmen `@@||…^`)
-  - eigener DNS-Resolver mit Presets (AdGuard, AdGuard Familie, Cloudflare, Quad9) oder eigener Adresse (Pi-hole/AdGuard Home)
-  - beides einzeln in den Einstellungen an-/abschaltbar, mit Statistik (Anfragen / gesperrt)
-  - gilt für jede Anfrage der App, auch für Weiterleitungen und eingebettete Player (iframes)
-- **Player** über `sceAvPlayer` (Hardware-Dekodierung H.264/AAC), Pause, Spulen ±10 s / ±60 s, Fortschrittsanzeige
+  - *Mediatheken* – ARD, ZDF, arte, 3sat, KiKA … pro Sender: Neueste, Sendungen, Kategorien (Filme, Dokus, Krimis …), ohne 80er-Grenze
+  - *Sender-Finder* – tausende frei empfangbare Sender (iptv-org) nach Kategorie, Land, Sprache; Pluto TV, Samsung TV Plus, Rakuten TV; Anime & Zeichentrick
+  - *South Park* – alle Staffeln von southpark.de (Deutsch/Englisch)
+  - *M3U-Playlists & Favoriten* – eigene Listen, Logos, Gruppen
+  - *Direkte URL & Website-Scanner* – Link abspielen oder eine Website nach Videos/Streams durchsuchen
+  - *Eigene Websites* – per Muster in `sites.txt`
+- **Favoriten & Playlists** – mit Quadrat einzelne Einträge oder ganze Listen speichern
+- **Player** – MP4, HLS (inkl. AES-128), MPEG-TS; Hardware-H.264 bis 720p, Software-Ersatz für SD/Interlaced; AAC/MP3/AC3; Werbeunterbrechungen (Zeitsprünge) werden überbrückt
+- **AdBlock** – lokale Blockliste + eigener DNS (AdGuard, Cloudflare, Quad9, eigener Server), einzeln schaltbar
 
 ## Bedienung
 
@@ -27,6 +26,8 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
 | Bestätigen (✕ oder ○, je nach Region) | öffnen / abspielen | Pause |
 | Zurück | eine Ebene zurück | Wiedergabe beenden |
 | △ | Suche (in der Quelle) / Einstellungen (Startseite) | – |
+| □ | Favoriten / Playlist-Menü | – |
+| SELECT | – | technische Infos (Decoder, Puffer) |
 | L / R | seitenweise blättern | ±60 s |
 | ◀ / ▶ | DNS-Preset wechseln (Einstellungen) | ±10 s |
 | START | App beenden | – |
@@ -119,7 +120,8 @@ cmake -S . -B build -DUSE_MBEDTLS=ON && cmake --build build
 Ohne lokales SDK: Repository auf GitHub pushen – der Workflow `.github/workflows/build.yml` baut die VPK im
 `vitasdk/vitasdk`-Container und stellt sie unter *Actions → Artifacts* bereit.
 
-Host-Tests (Blockliste, DNS-Resolver, alle Lua-Plugins mit simuliertem Netzwerk):
+Host-Tests (Blockliste, DNS-Resolver, alle Lua-Plugins mit simuliertem Netzwerk;
+Player-Tests mit `tests/build_media_test.sh` + `tests/test_media` gegen einen lokalen Testserver `tests/http_server.py`):
 
 ```sh
 git clone --depth 1 -b v5.4.6 https://github.com/lua/lua tests/lua && make -C tests/lua
@@ -128,7 +130,7 @@ LUA_SRC=./lua tests/run_tests.sh
 
 ## Technische Hinweise & Grenzen
 
-- **Formate:** Die Vita dekodiert H.264 (bis ca. 720p, ideal 960×544) mit AAC. HEVC, VP9 und AV1 laufen nicht.
+- **Formate:** Die Vita dekodiert H.264 per Hardware bis 1280×720. 1080p-Streams lassen sich nicht abspielen (bei HLS wird automatisch ≤720p gewählt). SD-Streams, die der Hardware-Decoder ablehnt (z. B. Interlaced-TV), laufen per Software. HEVC, VP9, AV1 und DRM (Widevine/SAMPLE-AES) gehen nicht.
 - **MP4** wird über den eigenen Netzwerkstack (curl, Range-Anfragen mit 512-KB-Puffer) gelesen – AdBlock, DNS und Header gelten vollständig.
 - **HLS (.m3u8)** wird direkt an `sceAvPlayer` übergeben und nutzt dabei den System-DNS; Plugin-Seiten, Weiterleitungen und die Stream-URL selbst werden vorher trotzdem gegen die Blockliste geprüft. Benötigt ein HLS-Stream spezielle Header (Referer), kann die Wiedergabe scheitern – ein lokaler HLS-Proxy wäre der nächste Ausbauschritt.
 - Ungetestet auf echter Hardware: dieser Stand ist gegen die vita-headers syntaxgeprüft, Blockliste/DNS/Plugins sind per Host-Tests geprüft. Der Player-Teil (`player.c`) muss auf der Konsole verifiziert werden.

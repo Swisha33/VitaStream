@@ -358,12 +358,13 @@ static void read_items(int idx, PluginList *out)
         int t = lua_gettop(L);
         if (!lua_istable(L, t)) { lua_pop(L, 1); continue; }
         PluginItem *it = &out->items[out->count];
-        char buf[512];
+        char buf[2048];
         copy_field(L, t, "title", buf, sizeof buf, "(ohne Titel)");    it->title = strdup(buf);
         copy_field(L, t, "subtitle", buf, sizeof buf, "");             it->subtitle = strdup(buf);
         copy_field(L, t, "id", buf, sizeof buf, "");                   it->id = strdup(buf);
+        copy_field(L, t, "thumb", buf, sizeof buf, "");                it->thumb = buf[0] ? strdup(buf) : NULL;
         copy_field(L, t, "kind", buf, sizeof buf, "video");
-        it->kind = !strcmp(buf, "folder") ? ITEM_FOLDER : ITEM_VIDEO;
+        it->kind = !strcmp(buf, "folder") ? ITEM_FOLDER : !strcmp(buf, "more") ? ITEM_MORE : ITEM_VIDEO;
         it->ref = luaL_ref(L, LUA_REGISTRYINDEX);                      /* pop */
         out->count++;
     }
@@ -465,6 +466,7 @@ static int start(Op op, int src, const char *arg, int item_ref)
     W.src = src;
     W.item_ref = item_ref;
     W.err[0] = 0;
+    s_log[0] = 0;
     W.state = JOB_RUNNING;
     W.pending = 1;
     pthread_cond_signal(&W.cv);
@@ -512,11 +514,32 @@ void plugins_list_free(PluginList *l)
         free(l->items[i].title);
         free(l->items[i].subtitle);
         free(l->items[i].id);
+        free(l->items[i].thumb);
         if (L) luaL_unref(L, LUA_REGISTRYINDEX, l->items[i].ref);
     }
     pthread_mutex_unlock(&s_lua_lock);
     free(l->items);
     memset(l, 0, sizeof *l);
+}
+
+void plugins_list_append(PluginList *dst, PluginList *src, int remove_index)
+{
+    if (remove_index >= 0 && remove_index < dst->count) {
+        PluginItem *it = &dst->items[remove_index];
+        pthread_mutex_lock(&s_lua_lock);
+        free(it->title); free(it->subtitle); free(it->id); free(it->thumb);
+        if (L) luaL_unref(L, LUA_REGISTRYINDEX, it->ref);
+        pthread_mutex_unlock(&s_lua_lock);
+        memmove(it, it + 1, sizeof *it * (dst->count - remove_index - 1));
+        dst->count--;
+    }
+    if (src->count > 0) {
+        dst->items = realloc(dst->items, sizeof(PluginItem) * (dst->count + src->count));
+        memcpy(dst->items + dst->count, src->items, sizeof(PluginItem) * src->count);
+        dst->count += src->count;
+    }
+    free(src->items);
+    memset(src, 0, sizeof *src);
 }
 
 /* ======================= Lebenszyklus ======================= */

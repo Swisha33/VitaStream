@@ -30,6 +30,15 @@ void vdec_reset(void);      /* nach Sprüngen: interne Referenzbilder verwerfen 
 void vdec_close(void);
 const char *vdec_last_error(void);
 
+/* ---------- Software-H.264 (FFmpeg) als Ersatz, z. B. für Interlaced-SD ----------
+ * Ausgabe YUV420 planar in dst: Y (width x height, Zeilenlänge width), danach U, danach V
+ * (je width/2 x height/2). Halbbilder werden zeilenverdoppelt (einfaches Deinterlacing). */
+int  vsw_open(void);
+int  vsw_decode(const uint8_t *au, int len, int64_t pts90k, const VdecTarget *dst, VdecResult *res);
+void vsw_reset(void);
+void vsw_close(void);
+const char *vsw_last_error(void);
+
 /* ---------- Bildpuffer (vom Player als Textur angezeigt) ---------- */
 
 /* Legt Puffer Nummer slot an (RGBA8888, mindestens w x h); liefert Zeiger und pitch (Pixel). */

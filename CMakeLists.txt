@@ -13,7 +13,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "VitaStream")
 set(VITA_TITLEID  "VSTR00001")
-set(VITA_VERSION  "00.20")
+set(VITA_VERSION  "00.30")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall -Wno-unused-function")
@@ -37,7 +37,11 @@ add_executable(${PROJECT_NAME}
   src/media.c
   src/hls.c
   src/vdec_vita.c
+  src/vdec_sw.c
   src/aout_vita.c
+  src/thumbs.c
+  src/thumbfetch.c
+  third_party/aes/aes.c
 )
 
 # Minimal-FFmpeg (Demuxer + Audio-Decoder), gebaut von ci/build-ffmpeg-vita.sh
@@ -95,6 +99,9 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
   FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
   FILE data/plugins/json.lua data/plugins/json.lua
+  FILE data/plugins/m3ulib.lua data/plugins/m3ulib.lua
+  FILE data/plugins/finder.lua data/plugins/finder.lua
+  FILE data/plugins/southpark.lua data/plugins/southpark.lua
   FILE data/plugins/direct.lua data/plugins/direct.lua
   FILE data/plugins/m3u.lua data/plugins/m3u.lua
   FILE data/plugins/mediathek.lua data/plugins/mediathek.lua

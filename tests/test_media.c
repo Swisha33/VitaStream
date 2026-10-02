@@ -35,10 +35,11 @@ int main(int argc, char **argv)
         int64_t t = plat_now_us() - t0;
         if (t > secs * 1e6) break;
         int w, h;
-        int slot = media_current_frame(&w, &h);
+        int yuv;
+        int slot = media_current_frame(&w, &h, &yuv);
         if (slot != last_slot) { frames_changed++; last_slot = slot; }
         int64_t pos = media_position_ms();
-        if (st == MS_PLAYING && last_pos >= 0 && pos + 50 < last_pos && !seek_done) backwards++;
+        if (st == MS_PLAYING && last_pos >= 0 && pos + 50 < last_pos && !seek_done && !getenv("VS_JUMPS")) backwards++;
         last_pos = pos;
         if (seek && !seek_done && t > secs * 1e6 / 2 && st == MS_PLAYING) {
             pos_before = pos;
@@ -62,7 +63,8 @@ int main(int argc, char **argv)
     else if (!strcmp(expect, "audio")) ok = st != MS_ERROR && !media_has_video() && g_aout_chunks > 50;
     else {
         double played = secs - (seek_done ? 0 : 0);
-        ok = st != MS_ERROR && g_vdec_errors == 0 && backwards == 0 && g_aout_chunks > 50 &&
+        int allowed_errors = getenv("VS_HW_FAIL") ? 6 : 0;   /* bis zum Wechsel auf Software */
+        ok = st != MS_ERROR && g_vdec_errors <= allowed_errors && backwards == 0 && g_aout_chunks > 50 &&
              frames_changed > played * 10 && pos > 1000;
         if (seek && seek_done) {
             double expect_pos = pos_before / 1000.0 + seek + (secs / 2);   /* grob */

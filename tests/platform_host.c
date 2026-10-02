@@ -38,6 +38,7 @@ int vdec_open(int w, int h)
 
 int vdec_decode(const uint8_t *au, int len, int64_t pts90k, const VdecTarget *dst, VdecResult *res)
 {
+    if (getenv("VS_HW_FAIL")) { snprintf(s_err, sizeof s_err, "Decode 0x80620010 (simuliert)"); g_vdec_errors++; return -1; }
     /* wie die Hardware: reine Annex-B-Daten, keine Extradata */
     if (len < 4 || !(au[0] == 0 && au[1] == 0 && (au[2] == 1 || (au[2] == 0 && au[3] == 1)))) {
         snprintf(s_err, sizeof s_err, "kein Annex-B");

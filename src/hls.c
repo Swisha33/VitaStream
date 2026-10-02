@@ -1,5 +1,6 @@
 #include "hls.h"
 #include "net.h"
+#include "../third_party/aes/aes.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,9 @@ typedef struct {
     double  duration;
     int64_t seq;
     int64_t br_off, br_len;   /* EXT-X-BYTERANGE, br_len < 0 = ganzes Segment */
+    char   *key_uri;          /* AES-128-Schlüssel (NULL = unverschlüsselt) */
+    uint8_t iv[16];
+    int     has_iv;           /* sonst IV = Sequenznummer */
 } Segment;
 
 struct Hls {
@@ -35,6 +39,11 @@ struct Hls {
     size_t    pos;
     char      info[96];
     char      err[160];
+    char     *cur_key_uri;       /* beim Parsen gültiger Schlüssel */
+    uint8_t   cur_iv[16];
+    int       cur_has_iv;
+    char     *key_cache_uri;     /* zuletzt geladener Schlüssel */
+    uint8_t   key_cache[16];
 };
 
 /* ---------------------------------------------------------------- Hilfen */
@@ -121,8 +130,31 @@ static char *fetch(Hls *h, const char *url, long *status_out, char *final_url, i
 
 static void free_segments(Hls *h)
 {
-    for (int i = 0; i < h->nseg; i++) free(h->seg[i].uri);
+    for (int i = 0; i < h->nseg; i++) { free(h->seg[i].uri); free(h->seg[i].key_uri); }
     h->nseg = 0;
+}
+
+static int hexval(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    c = (char)tolower((unsigned char)c);
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+/* "0x00112233..." -> 16 Bytes (kürzere Werte werden links mit 0 aufgefüllt) */
+static int parse_iv(const char *v, uint8_t out[16])
+{
+    if (v[0] == '0' && (v[1] == 'x' || v[1] == 'X')) v += 2;
+    size_t n = strlen(v);
+    if (n == 0 || n > 32) return -1;
+    memset(out, 0, 16);
+    for (size_t i = 0; i < n; i++) {
+        int d = hexval(v[n - 1 - i]);
+        if (d < 0) return -1;
+        out[15 - i / 2] |= (uint8_t)(i % 2 ? d << 4 : d);
+    }
+    return 0;
 }
 
 /* ---------------------------------------------------------------- Master */
@@ -189,6 +221,9 @@ static int choose_variant(Hls *h, const char *text, const char *base, char *out,
 static int parse_media(Hls *h, const char *text, const char *base)
 {
     free_segments(h);
+    free(h->cur_key_uri);
+    h->cur_key_uri = NULL;
+    h->cur_has_iv = 0;
     h->endlist = 0;
     h->target_duration = 6;
     int64_t seq = 0;
@@ -214,9 +249,22 @@ static int parse_media(Hls *h, const char *text, const char *base)
         } else if (!strncmp(line, "#EXT-X-ENDLIST", 14)) {
             h->endlist = 1;
         } else if (!strncmp(line, "#EXT-X-KEY:", 11)) {
-            char v[64];
-            if (attr(line + 11, "METHOD", v, sizeof v) && strcmp(v, "NONE")) {
-                snprintf(h->err, sizeof h->err, "Verschluesselter Stream (%s) wird nicht unterstuetzt", v);
+            char v[2048], abs_uri[2048];
+            if (!attr(line + 11, "METHOD", v, sizeof v) || !strcmp(v, "NONE")) {
+                free(h->cur_key_uri);
+                h->cur_key_uri = NULL;
+            } else if (!strcmp(v, "AES-128")) {
+                if (!attr(line + 11, "URI", v, sizeof v)) {
+                    snprintf(h->err, sizeof h->err, "AES-128 ohne Schluessel-URI");
+                    return -1;
+                }
+                hls_join_url(base, v, abs_uri, sizeof abs_uri);
+                free(h->cur_key_uri);
+                h->cur_key_uri = strdup(abs_uri);
+                h->cur_has_iv = attr(line + 11, "IV", v, sizeof v) && parse_iv(v, h->cur_iv) == 0;
+            } else {
+                /* SAMPLE-AES, Widevine, FairPlay ... = echtes DRM */
+                snprintf(h->err, sizeof h->err, "Stream ist DRM-geschuetzt (%s) - nicht abspielbar", v);
                 return -1;
             }
         } else if (!strncmp(line, "#EXT-X-MAP:", 11)) {
@@ -250,6 +298,9 @@ static int parse_media(Hls *h, const char *text, const char *base)
             s->seq = seq++;
             s->br_len = have_br ? br_len : -1;
             s->br_off = have_br ? br_off : 0;
+            s->key_uri = h->cur_key_uri ? strdup(h->cur_key_uri) : NULL;
+            s->has_iv = h->cur_has_iv;
+            memcpy(s->iv, h->cur_iv, 16);
             if (have_br) next_off = br_off + br_len;
             have_br = 0;
             dur = 0;
@@ -323,6 +374,8 @@ void hls_close(Hls *h)
     free(h->seg);
     free(h->map_uri);
     free(h->headers);
+    free(h->cur_key_uri);
+    free(h->key_cache_uri);
     net_buf_free(&h->buf);
     free(h);
 }
@@ -351,6 +404,43 @@ static int download(Hls *h, const char *uri, int64_t off, int64_t len)
     return -1;
 }
 
+/* AES-128-CBC: Schlüssel laden (gecacht) und h->buf entschlüsseln, PKCS#7-Padding entfernen */
+static int decrypt_segment(Hls *h, const Segment *s)
+{
+    if (!h->key_cache_uri || strcmp(h->key_cache_uri, s->key_uri)) {
+        NetBuf kb;
+        long status = 0;
+        int r = net_request_ex(s->key_uri, NULL, h->headers, &kb, &status, NULL, 0, h->abort_flag);
+        if (r != NET_OK || status >= 400 || kb.len != 16) {
+            snprintf(h->err, sizeof h->err, "AES-Schluessel nicht ladbar (%s)",
+                     r != NET_OK ? net_last_detail() : (kb.len != 16 ? "falsche Laenge" : "HTTP-Fehler"));
+            net_buf_free(&kb);
+            return -1;
+        }
+        memcpy(h->key_cache, kb.data, 16);
+        net_buf_free(&kb);
+        free(h->key_cache_uri);
+        h->key_cache_uri = strdup(s->key_uri);
+    }
+    if (h->buf.len == 0 || h->buf.len % 16) {
+        snprintf(h->err, sizeof h->err, "Verschluesseltes Segment hat ungueltige Laenge");
+        return -1;
+    }
+    uint8_t iv[16];
+    if (s->has_iv) {
+        memcpy(iv, s->iv, 16);
+    } else {
+        memset(iv, 0, 16);
+        for (int i = 0; i < 8; i++) iv[15 - i] = (uint8_t)((uint64_t)s->seq >> (8 * i));
+    }
+    struct AES_ctx ctx;
+    AES_init_ctx_iv(&ctx, h->key_cache, iv);
+    AES_CBC_decrypt_buffer(&ctx, (uint8_t *)h->buf.data, h->buf.len);
+    uint8_t pad = (uint8_t)h->buf.data[h->buf.len - 1];
+    if (pad >= 1 && pad <= 16 && pad <= h->buf.len) h->buf.len -= pad;
+    return 0;
+}
+
 /* Lädt das nächste Segment (oder das Init-Segment) in h->buf. 0 = ok, 1 = Ende, -1 = Fehler */
 static int next_chunk(Hls *h)
 {
@@ -363,7 +453,12 @@ static int next_chunk(Hls *h)
         if (h->cur < h->nseg) {
             Segment *s = &h->seg[h->cur++];
             h->last_seq = s->seq;
-            if (download(h, s->uri, s->br_off, s->br_len) == 0) return 0;
+            if (download(h, s->uri, s->br_off, s->br_len) == 0) {
+                if (!s->key_uri || decrypt_segment(h, s) == 0) return 0;
+                net_buf_free(&h->buf);
+                if (!h->endlist) continue;
+                return -1;
+            }
             if (!h->endlist) continue;      /* Live: fehlendes Segment überspringen */
             return -1;
         }

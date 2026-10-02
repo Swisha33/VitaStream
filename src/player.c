@@ -10,6 +10,7 @@
 #include <vita2d.h>
 
 static vita2d_texture *s_tex[MEDIA_SLOTS];
+static int             s_tex_w[MEDIA_SLOTS], s_tex_h[MEDIA_SLOTS], s_tex_yuv[MEDIA_SLOTS];
 static char            s_err[256];
 static int             s_open;
 static int             s_debug;
@@ -23,6 +24,9 @@ void *fb_create(int slot, int w, int h, int *pitch)
     if (!s_tex[slot]) return NULL;
     vita2d_texture_set_filters(s_tex[slot], SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
     *pitch = vita2d_texture_get_stride(s_tex[slot]) / 4;
+    s_tex_w[slot] = w;
+    s_tex_h[slot] = h;
+    s_tex_yuv[slot] = 0;
     void *px = vita2d_texture_get_datap(s_tex[slot]);
     memset(px, 0, (size_t)vita2d_texture_get_stride(s_tex[slot]) * h);
     return px;
@@ -74,9 +78,17 @@ void player_toggle_debug(void) { s_debug = !s_debug; }
 void player_draw(void)
 {
     if (!s_open) return;
-    int w = 0, h = 0;
-    int slot = media_current_frame(&w, &h);
+    int w = 0, h = 0, yuv = 0;
+    int slot = media_current_frame(&w, &h, &yuv);
     if (slot >= 0 && s_tex[slot] && w > 0 && h > 0) {
+        if (yuv != s_tex_yuv[slot]) {
+            /* gleicher Speicher, andere Interpretation: RGBA vom Hardware-, YUV vom Software-Decoder */
+            sceGxmTextureInitLinear(&s_tex[slot]->gxm_tex, vita2d_texture_get_datap(s_tex[slot]),
+                                    yuv ? SCE_GXM_TEXTURE_FORMAT_YUV420P3_CSC0 : SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,
+                                    s_tex_w[slot], s_tex_h[slot], 0);
+            vita2d_texture_set_filters(s_tex[slot], SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
+            s_tex_yuv[slot] = yuv;
+        }
         float sx = (float)SCREEN_W / w, sy = (float)SCREEN_H / h;
         float s = sx < sy ? sx : sy;
         float dw = w * s, dh = h * s;

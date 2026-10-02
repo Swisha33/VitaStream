@@ -33,6 +33,25 @@
 #define MAX_VIDEO_W     1920
 #define MAX_VIDEO_H     1088
 
+/* ================================================================ Decoder-Auswahl */
+
+typedef struct {
+    int  (*decode)(const uint8_t *, int, int64_t, const VdecTarget *, VdecResult *);
+    void (*reset)(void);
+    void (*close)(void);
+    const char *(*error)(void);
+    int  yuv;            /* Ausgabeformat: 0 = RGBA8888, 1 = YUV420 planar */
+    const char *name;
+} VDec;
+
+static const VDec VD_HW = { vdec_decode, vdec_reset, vdec_close, vdec_last_error, 0, "Hardware" };
+static const VDec VD_SW = { vsw_decode,  vsw_reset,  vsw_close,  vsw_last_error,  1, "Software" };
+
+#define HW_MAX_W 1280
+#define HW_MAX_H 720
+#define SW_MAX_W 1024
+#define SW_MAX_H 576
+
 /* ================================================================ Paket-Warteschlange */
 
 typedef struct PNode {
@@ -139,6 +158,7 @@ typedef struct {
     FState  st;
     int64_t pts;     /* µs */
     int     w, h;
+    int     yuv;
 } FSlot;
 
 static struct {
@@ -162,6 +182,9 @@ static struct {
     int             out_rate;
     int             aout_ok, audio_failed;
     int             vdec_ok;
+    const VDec     *vd;
+    int             vw, vh;           /* Videogröße laut Stream */
+    int             sw_skip_to_key;
 
     /* Threads & Queues */
     pthread_t       demux_t, video_t, audio_t;
@@ -342,7 +365,7 @@ static int slots_alloc(int w, int h)
     return 0;
 }
 
-int media_current_frame(int *w, int *h)
+int media_current_frame(int *w, int *h, int *yuv)
 {
     if (!M.vdec_ok) return -1;
     pthread_mutex_lock(&M.fm);
@@ -378,13 +401,22 @@ int media_current_frame(int *w, int *h)
             FSlot *s = &M.slot[i];
             if (s->st == FS_READY && s->pts <= clk + 15000 && (best < 0 || s->pts > M.slot[best].pts)) best = i;
         }
-        /* Zeitsprung (z. B. Live-Diskontinuität): alle Bilder weit in der Zukunft */
-        if (best < 0 && min_i >= 0 && min_pts - clk > 2000000) {
-            int all_ready = 1;
+        /* Zeitsprung (Werbeblock, Live-Diskontinuität): Bilder weit weg von der Uhr */
+        if (best < 0 && min_i >= 0) {
+            int64_t newest = INT64_MIN;
             for (int i = 0; i < MEDIA_SLOTS; i++)
-                if (M.slot[i].st == FS_FREE || M.slot[i].st == FS_DECODING) all_ready = 0;
-            if (all_ready || !audio_is_master()) {
-                clock_set(min_pts, audio_is_master());
+                if (M.slot[i].st == FS_READY && M.slot[i].pts > newest) newest = M.slot[i].pts;
+            if (audio_is_master()) {
+                /* Ton führt: Bilder aus der "alten" Zeitachse verwerfen */
+                for (int i = 0; i < MEDIA_SLOTS; i++) {
+                    int64_t d = M.slot[i].pts - clk;
+                    if (M.slot[i].st == FS_READY && (d > 5000000 || d < -5000000)) {
+                        M.slot[i].st = FS_FREE;
+                        M.frames_dropped++;
+                    }
+                }
+            } else if (min_pts - clk > 2000000 || newest < clk - 2000000) {
+                clock_set(min_pts, 0);   /* Systemuhr springt mit */
                 best = min_i;
             }
         }
@@ -408,6 +440,7 @@ int media_current_frame(int *w, int *h)
     if (cur >= 0) {
         if (w) *w = M.slot[cur].w;
         if (h) *h = M.slot[cur].h;
+        if (yuv) *yuv = M.slot[cur].yuv;
     }
     pthread_mutex_unlock(&M.fm);
     return cur;
@@ -426,7 +459,7 @@ static void *video_thread(void *arg)
         if (r == 0) continue;
         if (n.serial != serial) {
             serial = n.serial;
-            vdec_reset();
+            M.vd->reset();
             pthread_mutex_lock(&M.fm);
             for (int i = 0; i < MEDIA_SLOTS; i++)
                 if (M.slot[i].st == FS_READY) M.slot[i].st = FS_FREE;
@@ -434,6 +467,8 @@ static void *video_thread(void *arg)
         }
         if (!n.pkt) continue;       /* EOF-Markierung */
         if (n.serial != M.serial) { av_packet_free(&n.pkt); continue; }   /* veraltet */
+        if (M.sw_skip_to_key && !(n.pkt->flags & AV_PKT_FLAG_KEY)) { av_packet_free(&n.pkt); continue; }
+        M.sw_skip_to_key = 0;
 
         /* freien Puffer suchen */
         int slot = -1;
@@ -456,7 +491,7 @@ static void *video_thread(void *arg)
         int64_t pts90k = ts != AV_NOPTS_VALUE ? av_rescale_q(ts, M.vtb, (AVRational){1, 90000}) : -1;
         VdecTarget dst = { M.slot[slot].px, M.slot[slot].pitch, M.slot[slot].bw, M.slot[slot].bh };
         VdecResult res = { -1, 0, 0 };
-        int dr = vdec_decode(n.pkt->data, n.pkt->size, pts90k, &dst, &res);
+        int dr = M.vd->decode(n.pkt->data, n.pkt->size, pts90k, &dst, &res);
         M.vpackets++;
 
         pthread_mutex_lock(&M.fm);
@@ -466,6 +501,7 @@ static void *video_thread(void *arg)
                                      : av_rescale_q(ts, M.vtb, (AVRational){1, 1000000});
             s->w = res.width > 0 ? res.width : s->bw;
             s->h = res.height > 0 ? res.height : s->bh;
+            s->yuv = M.vd->yuv;
             s->st = FS_READY;
         } else {
             s->st = FS_FREE;
@@ -475,9 +511,20 @@ static void *video_thread(void *arg)
 
         if (dr < 0) {
             M.vdec_errors++;
-            if (M.frames_shown == 0 && M.vdec_errors >= 30)
-                set_error("Hardware-Decoder lehnt den Stream ab (%s). Evtl. Profil/Aufloesung nicht unterstuetzt.",
-                          vdec_last_error());
+            /* Hardware lehnt den Stream ab (z. B. Halbbilder/Interlaced bei SD-TV): Software übernimmt */
+            if (M.vd == &VD_HW && M.frames_shown == 0 && M.vdec_errors >= 6) {
+                if (M.vw <= SW_MAX_W && M.vh <= SW_MAX_H && vsw_open() == 0) {
+                    vdec_close();
+                    M.vd = &VD_SW;
+                    M.vdec_errors = 0;
+                    M.sw_skip_to_key = 1;
+                } else {
+                    set_error("Hardware-Decoder lehnt den Stream ab (%s). Software-Dekodierung geht nur bis 1024x576.",
+                              vdec_last_error());
+                }
+            } else if (M.frames_shown == 0 && M.vdec_errors >= 60) {
+                set_error("Video nicht dekodierbar (%s)", M.vd->error());
+            }
         }
     }
     return NULL;
@@ -520,6 +567,10 @@ static void *audio_thread(void *arg)
     AVFrame *f = av_frame_alloc();
     const int cap = 16384;
     int16_t *ring = malloc(cap * 2 * sizeof(int16_t));
+    /* Die Hardware liest den übergebenen Puffer noch, während aout_write schon zurückkehrt:
+       deshalb reihum eigene Ausgabepuffer statt des Ringpuffers selbst */
+    static int16_t outbuf[3][AOUT_GRAIN * 2];
+    int outidx = 0;
     int fill = 0;
     int64_t ring_pts = AV_NOPTS_VALUE;
     int serial = M.serial;
@@ -557,7 +608,9 @@ static void *audio_thread(void *arg)
             while (fill >= AOUT_GRAIN && !M.abort && serial == M.serial) {
                 while (M.paused && !M.abort && serial == M.serial) usleep(10000);
                 if (serial != M.serial || M.abort) break;
-                aout_write(ring);
+                memcpy(outbuf[outidx], ring, sizeof outbuf[0]);
+                aout_write(outbuf[outidx]);
+                outidx = (outidx + 1) % 3;
                 if (ring_pts != AV_NOPTS_VALUE) {
                     /* aout_write kehrt zurück, wenn der Puffer übernommen wurde; hörbar ist etwa der vorige */
                     int64_t grain_us = (int64_t)AOUT_GRAIN * 1000000 / M.out_rate;
@@ -687,8 +740,28 @@ static int open_source(char *err, int errlen)
 
     if (M.vi >= 0) {
         AVCodecParameters *cp = M.fmt->streams[M.vi]->codecpar;
+        M.vw = cp->width;
+        M.vh = cp->height;
         int w = (cp->width + 15) & ~15, h = (cp->height + 15) & ~15;
-        if (vdec_open(w, h) < 0) {
+        if (cp->width > HW_MAX_W || cp->height > HW_MAX_H) {
+            /* manche Konsolen/Firmwares schaffen mehr - probieren, sonst klare Meldung */
+            if (vdec_open(w, h) == 0) {
+                M.vd = &VD_HW;
+            } else {
+                snprintf(err, errlen, "Video ist %dx%d - die Vita dekodiert per Hardware hoechstens 1280x720 (720p). "
+                         "Bitte eine Quelle/Qualitaet mit max. 720p waehlen.", cp->width, cp->height);
+                return -1;
+            }
+        } else if (vdec_open(HW_MAX_W, HW_MAX_H) == 0) {
+            /* fest 720p: Auflösungswechsel im Stream (Werbung, adaptive Qualität) bleiben möglich */
+            M.vd = &VD_HW;
+            w = HW_MAX_W;
+            h = HW_MAX_H;
+        } else if (vdec_open(w, h) == 0) {
+            M.vd = &VD_HW;
+        } else if (cp->width <= SW_MAX_W && cp->height <= SW_MAX_H && vsw_open() == 0) {
+            M.vd = &VD_SW;
+        } else {
             snprintf(err, errlen, "Hardware-Decoder: %s", vdec_last_error());
             return -1;
         }
@@ -841,7 +914,7 @@ void media_close(void)
     avcodec_free_context(&M.actx);
     swr_free(&M.swr);
     av_channel_layout_uninit(&M.swr_layout);
-    if (M.vdec_ok) vdec_close();
+    if (M.vdec_ok && M.vd) M.vd->close();
     for (int i = 0; i < MEDIA_SLOTS; i++)
         if (M.slot[i].px) fb_destroy(i);
     hls_close(M.hls);
@@ -924,7 +997,7 @@ int media_buffering(void)
 
 void media_debug(char *buf, int n)
 {
-    snprintf(buf, n, "%s\nQueue V:%d A:%d  Bilder:%d verw.:%d  Dec-Fehler:%d  Pakete:%d",
-             M.info[0] ? M.info : "-", pq_count(&M.vq), pq_count(&M.aq),
+    snprintf(buf, n, "%s\n%s-Decoder  Queue V:%d A:%d  Bilder:%d verw.:%d  Dec-Fehler:%d  Pakete:%d",
+             M.info[0] ? M.info : "-", M.vd ? M.vd->name : "-", pq_count(&M.vq), pq_count(&M.aq),
              M.frames_shown, M.frames_dropped, M.vdec_errors, M.vpackets);
 }

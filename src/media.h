@@ -15,8 +15,9 @@ void       media_close(void);
 MediaState media_state(void);
 const char *media_error(void);
 
-/* Liefert den Bildpuffer (Slot), der jetzt angezeigt werden soll, oder -1. */
-int        media_current_frame(int *w, int *h);
+/* Liefert den Bildpuffer (Slot), der jetzt angezeigt werden soll, oder -1.
+ * yuv: 0 = RGBA8888, 1 = YUV420 planar (Y, dann U, dann V; Breite/Höhe des Puffers) */
+int        media_current_frame(int *w, int *h, int *yuv);
 
 void       media_toggle_pause(void);
 int        media_paused(void);

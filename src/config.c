@@ -42,10 +42,15 @@ static int copy_file(const char *src, const char *dst)
 
 void config_install_defaults(void)
 {
+    /* Nutzerdateien: nur anlegen, wenn sie fehlen */
     static const char *files[] = {
         "config.ini", "blocklist.txt", "sites.txt", "playlists.txt", "cacert.pem",
-        "plugins/json.lua", "plugins/direct.lua", "plugins/m3u.lua",
-        "plugins/mediathek.lua", "plugins/website.lua",
+    };
+    /* Mitgelieferte Plugins: bei jeder neuen App-Version aktualisieren
+       (eigene Plugins mit anderen Dateinamen bleiben unberührt) */
+    static const char *plugins[] = {
+        "plugins/json.lua", "plugins/m3ulib.lua", "plugins/direct.lua", "plugins/m3u.lua",
+        "plugins/mediathek.lua", "plugins/website.lua", "plugins/finder.lua", "plugins/southpark.lua",
     };
     mkdir("ux0:data", 0777);
     mkdir(VS_DATA_DIR, 0777);
@@ -57,6 +62,22 @@ void config_install_defaults(void)
         if (file_exists(dst)) continue; /* Nutzeränderungen nie überschreiben */
         snprintf(src, sizeof src, VS_APP_DATA "/%s", files[i]);
         copy_file(src, dst);
+    }
+
+    char ver[32] = "";
+    FILE *vf = fopen(VS_DATA_DIR "/.version", "r");
+    if (vf) { if (!fgets(ver, sizeof ver, vf)) ver[0] = 0; fclose(vf); }
+    ver[strcspn(ver, "\r\n")] = 0;
+    int update = strcmp(ver, VS_APP_VERSION) != 0;
+    for (size_t i = 0; i < sizeof plugins / sizeof *plugins; i++) {
+        snprintf(dst, sizeof dst, VS_DATA_DIR "/%s", plugins[i]);
+        if (!update && file_exists(dst)) continue;
+        snprintf(src, sizeof src, VS_APP_DATA "/%s", plugins[i]);
+        copy_file(src, dst);
+    }
+    if (update) {
+        vf = fopen(VS_DATA_DIR "/.version", "w");
+        if (vf) { fputs(VS_APP_VERSION "\n", vf); fclose(vf); }
     }
 }
 

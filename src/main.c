@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <ctype.h>
 
 #include <psp2/kernel/processmgr.h>
 #include <psp2/ctrl.h>
@@ -20,6 +22,7 @@
 #include "net.h"
 #include "plugins.h"
 #include "player.h"
+#include "thumbs.h"
 
 int _newlib_heap_size_user = 192 * 1024 * 1024;
 
@@ -28,7 +31,7 @@ int _newlib_heap_size_user = 192 * 1024 * 1024;
 #define MAX_DEPTH      16
 
 typedef enum { SCR_SOURCES, SCR_LIST, SCR_LOADING, SCR_PLAYER, SCR_SETTINGS } Screen;
-typedef enum { PEND_NONE, PEND_PUSH_LIST, PEND_PLAY } Pending;
+typedef enum { PEND_NONE, PEND_PUSH_LIST, PEND_PLAY, PEND_APPEND, PEND_SAVE } Pending;
 
 typedef struct {
     PluginList list;
@@ -45,6 +48,14 @@ static Pending pending;
 static char    pending_title[128];
 static char    last_query[256];
 static int     set_cursor, set_scroll;
+static int     append_index;            /* Position des "Weitere laden"-Eintrags */
+
+/* Speichern in eine Playlist: Einträge nacheinander auflösen */
+static struct {
+    char  file[128], name[64];
+    int  *idx;
+    int   n, pos, ok, fail;
+} save_job;
 
 /* ---------------- DNS-Presets ---------------- */
 
@@ -135,7 +146,7 @@ static void label_sources(void *ctx, int i, const char **t, const char **sub)
     *sub = s->description;
 }
 
-static void label_items(void *ctx, int i, const char **t, const char **sub)
+static void label_items(void *ctx, int i, const char **t, const char **sub, const char **thumb)
 {
     PluginList *l = ctx;
     static char buf[300];
@@ -143,10 +154,215 @@ static void label_items(void *ctx, int i, const char **t, const char **sub)
     if (it->kind == ITEM_FOLDER) {
         snprintf(buf, sizeof buf, "[+] %s", it->title);
         *t = buf;
+    } else if (it->kind == ITEM_MORE) {
+        snprintf(buf, sizeof buf, ">> %s", it->title);
+        *t = buf;
     } else {
         *t = it->title;
     }
     *sub = it->subtitle;
+    *thumb = it->thumb;
+}
+
+static void label_sources_thumb(void *ctx, int i, const char **t, const char **sub, const char **thumb)
+{
+    label_sources(ctx, i, t, sub);
+    *thumb = NULL;
+}
+
+/* ---------------- Playlists / Favoriten ---------------- */
+
+typedef struct { char name[64]; char file[128]; } LocalPl;
+
+/* Lokale Playlists aus playlists.txt ("Name|file:datei.m3u") */
+static int local_playlists(LocalPl *out, int max)
+{
+    FILE *f = fopen(PLAYLIST_FILE, "r");
+    if (!f) return 0;
+    char line[1100];
+    int n = 0;
+    while (n < max && fgets(line, sizeof line, f)) {
+        if (line[0] == '#') continue;
+        char *bar = strchr(line, '|');
+        if (!bar) continue;
+        *bar = 0;
+        char *u = bar + 1;
+        u[strcspn(u, "\r\n")] = 0;
+        if (strncmp(u, "file:", 5)) continue;
+        snprintf(out[n].name, sizeof out[n].name, "%s", line);
+        snprintf(out[n].file, sizeof out[n].file, "%s", u + 5);
+        n++;
+    }
+    fclose(f);
+    return n;
+}
+
+/* Legt die Playlist an (Datei + Eintrag in playlists.txt), falls neu */
+static void ensure_playlist(const char *name, const char *file)
+{
+    LocalPl pl[64];
+    int n = local_playlists(pl, 64);
+    for (int i = 0; i < n; i++) if (!strcmp(pl[i].file, file)) return;
+    FILE *f = fopen(PLAYLIST_FILE, "a");
+    if (f) { fprintf(f, "\n%s|file:%s\n", name, file); fclose(f); }
+    char path[256];
+    snprintf(path, sizeof path, VS_DATA_DIR "/%s", file);
+    FILE *m = fopen(path, "r");
+    if (m) { fclose(m); return; }
+    m = fopen(path, "w");
+    if (m) { fputs("#EXTM3U\n", m); fclose(m); }
+}
+
+static void header_value(const char *headers, const char *key, char *out, int n)
+{
+    out[0] = 0;
+    size_t kl = strlen(key);
+    for (const char *p = headers; p && *p; ) {
+        if (!strncasecmp(p, key, kl) && p[kl] == ':') {
+            p += kl + 1;
+            while (*p == ' ') p++;
+            int i = 0;
+            while (*p && *p != '\n' && i < n - 1) out[i++] = *p++;
+            out[i] = 0;
+            return;
+        }
+        p = strchr(p, '\n');
+        if (p) p++;
+    }
+}
+
+static void append_entry(const char *file, const PluginItem *it, const StreamInfo *si)
+{
+    char path[256], v[512];
+    snprintf(path, sizeof path, VS_DATA_DIR "/%s", file);
+    FILE *f = fopen(path, "a");
+    if (!f) return;
+    char title[256];
+    snprintf(title, sizeof title, "%s", it->title);
+    for (char *c = title; *c; c++) if (*c == ',' || *c == '\n') *c = ' ';
+    fprintf(f, "#EXTINF:-1 tvg-logo=\"%s\" group-title=\"VitaStream\",%s\n",
+            it->thumb && strncmp(it->thumb, "og:", 3) ? it->thumb : "", title);
+    header_value(si->headers, "Referer", v, sizeof v);
+    if (v[0]) fprintf(f, "#EXTVLCOPT:http-referrer=%s\n", v);
+    header_value(si->headers, "User-Agent", v, sizeof v);
+    if (v[0]) fprintf(f, "#EXTVLCOPT:http-user-agent=%s\n", v);
+    fprintf(f, "%s\n", si->url);
+    fclose(f);
+}
+
+static void make_filename(const char *name, char *out, int n)
+{
+    int j = 0;
+    for (const unsigned char *p = (const unsigned char *)name; *p && j < n - 5; p++) {
+        if (isalnum(*p)) out[j++] = (char)tolower(*p);
+        else if (j && out[j - 1] != '_') out[j++] = '_';
+    }
+    if (!j) out[j++] = 'p';
+    strcpy(out + j, ".m3u");
+}
+
+/* Ziel wählen: Favoriten / bestehende Playlist / neue. 1 = gewählt */
+static int choose_playlist(int favorites_only)
+{
+    if (favorites_only) {
+        snprintf(save_job.name, sizeof save_job.name, "Favoriten");
+        snprintf(save_job.file, sizeof save_job.file, "favoriten.m3u");
+        return 1;
+    }
+    LocalPl pl[32];
+    int n = local_playlists(pl, 31);
+    const char *opts[34];
+    int k = 0;
+    opts[k++] = "Favoriten";
+    for (int i = 0; i < n; i++) if (strcmp(pl[i].file, "favoriten.m3u")) opts[k++] = pl[i].name;
+    opts[k++] = "Neue Playlist...";
+    int c = ui_menu("In welche Playlist?", opts, k);
+    if (c < 0) return 0;
+    if (c == 0) return choose_playlist(1);
+    if (c == k - 1) {
+        char name[64];
+        if (!ui_input_text("Name der neuen Playlist", "", name, sizeof name) || !name[0]) return 0;
+        snprintf(save_job.name, sizeof save_job.name, "%s", name);
+        make_filename(name, save_job.file, sizeof save_job.file);
+        return 1;
+    }
+    for (int i = 0; i < n; i++)
+        if (!strcmp(pl[i].name, opts[c])) {
+            snprintf(save_job.name, sizeof save_job.name, "%s", pl[i].name);
+            snprintf(save_job.file, sizeof save_job.file, "%s", pl[i].file);
+            return 1;
+        }
+    return 0;
+}
+
+static void start_save_next(void);
+
+static void start_save(int *idx, int n)
+{
+    ensure_playlist(save_job.name, save_job.file);
+    free(save_job.idx);
+    save_job.idx = idx;
+    save_job.n = n;
+    save_job.pos = save_job.ok = save_job.fail = 0;
+    start_save_next();
+}
+
+static void start_save_next(void)
+{
+    Level *lv = &stack[depth - 1];
+    while (save_job.pos < save_job.n) {
+        PluginItem *it = &lv->list.items[save_job.idx[save_job.pos]];
+        char t[96];
+        snprintf(t, sizeof t, "Speichere %d/%d ...", save_job.pos + 1, save_job.n);
+        if (plugins_start_resolve(cur_src, it) == 0) {
+            pending = PEND_SAVE;
+            snprintf(pending_title, sizeof pending_title, "%s", t);
+            if (scr != SCR_LOADING) scr_before_loading = scr;
+            scr = SCR_LOADING;
+            return;
+        }
+        save_job.pos++;
+        save_job.fail++;
+    }
+    /* fertig */
+    char msg[256];
+    snprintf(msg, sizeof msg, "%d Eintrag/Eintraege in \"%s\" gespeichert%s. Zu finden unter \"M3U-Playlists\".",
+             save_job.ok, save_job.name, save_job.fail ? " (einige nicht aufloesbar)" : "");
+    pending = PEND_NONE;
+    scr = SCR_LIST;
+    free(save_job.idx);
+    save_job.idx = NULL;
+    ui_message("Playlist", msg);
+}
+
+/* Quadrat-Menü für den aktuellen Eintrag */
+static void item_menu(void)
+{
+    Level *lv = &stack[depth - 1];
+    if (!lv->list.count) return;
+    PluginItem *it = &lv->list.items[lv->cursor];
+    const char *opts[3];
+    int k = 0, a_fav = -1, a_pl = -1, a_all = -1;
+    if (it->kind == ITEM_VIDEO) {
+        a_fav = k; opts[k++] = "Zu Favoriten hinzufuegen";
+        a_pl  = k; opts[k++] = "Zu Playlist hinzufuegen...";
+    }
+    a_all = k; opts[k++] = "Ganze Liste als Playlist speichern...";
+    int c = ui_menu(it->title, opts, k);
+    if (c < 0) return;
+    if (c == a_fav || c == a_pl) {
+        if (!choose_playlist(c == a_fav)) return;
+        int *idx = malloc(sizeof(int));
+        idx[0] = lv->cursor;
+        start_save(idx, 1);
+    } else if (c == a_all) {
+        if (!choose_playlist(0)) return;
+        int *idx = malloc(sizeof(int) * lv->list.count), n = 0;
+        for (int i = 0; i < lv->list.count; i++)
+            if (lv->list.items[i].kind == ITEM_VIDEO) idx[n++] = i;
+        if (!n) { free(idx); ui_message("Playlist", "Diese Liste enthaelt keine abspielbaren Eintraege."); return; }
+        start_save(idx, n);
+    }
 }
 
 enum {
@@ -259,12 +475,18 @@ static void settings_action(int i, int dir)
 int main(void)
 {
     sceShellUtilInitEvents(0);
+    /* volle Taktrate: hilft beim Software-Decoder und beim Parsen großer Listen */
+    scePowerSetArmClockFrequency(444);
+    scePowerSetBusClockFrequency(222);
+    scePowerSetGpuClockFrequency(222);
+    scePowerSetGpuXbarClockFrequency(166);
     ui_init();
     config_install_defaults();
     config_load();
     reload_blocklist();
     net_init();
     plugins_init();
+    thumbs_init();
 
     if (!net_online())
         ui_message("Keine Verbindung", "Die Vita ist nicht mit dem Internet verbunden. "
@@ -293,7 +515,7 @@ int main(void)
             snprintf(right, sizeof right, "AdBlock %s  DNS %s",
                      g_cfg.adblock_enabled ? "AN" : "AUS", g_cfg.custom_dns_enabled ? "AN" : "AUS");
             ui_header("VitaStream - Quellen", right);
-            ui_list(n, src_cursor, &src_scroll, label_sources, NULL);
+            ui_list_thumbs(n, src_cursor, &src_scroll, label_sources_thumb, NULL);
             if (n == 0) ui_text(40, 180, COL_DIM, "Keine Plugins gefunden in " VS_DATA_DIR "/plugins");
             ui_footer("Bestaetigen: Oeffnen   Dreieck: Einstellungen   START: Beenden");
             ui_end();
@@ -307,19 +529,27 @@ int main(void)
             Source *s = plugins_source(cur_src);
             if (in.pressed & SCE_CTRL_UP)   lv->cursor = lv->cursor > 0 ? lv->cursor - 1 : (n ? n - 1 : 0);
             if (in.pressed & SCE_CTRL_DOWN) lv->cursor = n ? (lv->cursor + 1) % n : 0;
-            if (in.pressed & SCE_CTRL_LTRIGGER) lv->cursor = lv->cursor > 8 ? lv->cursor - 8 : 0;
-            if (in.pressed & SCE_CTRL_RTRIGGER) lv->cursor = lv->cursor + 8 < n ? lv->cursor + 8 : (n ? n - 1 : 0);
+            int page = ui_list_thumbs_visible();
+            if (in.pressed & SCE_CTRL_LTRIGGER) lv->cursor = lv->cursor > page ? lv->cursor - page : 0;
+            if (in.pressed & SCE_CTRL_RTRIGGER) lv->cursor = lv->cursor + page < n ? lv->cursor + page : (n ? n - 1 : 0);
 
             if ((in.pressed & BTN_ACCEPT) && n) {
                 PluginItem *it = &lv->list.items[lv->cursor];
                 if (it->kind == ITEM_FOLDER) {
+                    thumbs_drop_pending();
                     if (plugins_start_browse(cur_src, it->id) == 0) start_job_screen(PEND_PUSH_LIST, it->title);
+                } else if (it->kind == ITEM_MORE) {
+                    append_index = lv->cursor;
+                    if (plugins_start_browse(cur_src, it->id) == 0) start_job_screen(PEND_APPEND, lv->title);
                 } else {
                     if (plugins_start_resolve(cur_src, it) == 0) start_job_screen(PEND_PLAY, it->title);
                 }
             } else if (in.pressed & SCE_CTRL_TRIANGLE) {
                 search_in_current();
+            } else if (in.pressed & SCE_CTRL_SQUARE) {
+                item_menu();
             } else if (in.pressed & BTN_CANCEL) {
+                thumbs_drop_pending();
                 plugins_list_free(&stack[--depth].list);
                 if (depth == 0) scr = SCR_SOURCES;
             }
@@ -330,10 +560,10 @@ int main(void)
             char right[32];
             snprintf(right, sizeof right, "%d Eintraege", lv->list.count);
             ui_header(lv->title, right);
-            ui_list(lv->list.count, lv->cursor, &lv->scroll, label_items, &lv->list);
+            ui_list_thumbs(lv->list.count, lv->cursor, &lv->scroll, label_items, &lv->list);
             ui_footer(s && s->has_search
-                      ? "Bestaetigen: Oeffnen   Kreis/Kreuz: Zurueck   Dreieck: Suchen   L/R: Seite"
-                      : "Bestaetigen: Oeffnen   Kreis/Kreuz: Zurueck   L/R: Seite");
+                      ? "Bestaetigen: Oeffnen  Zurueck  Dreieck: Suchen  Quadrat: Playlist/Favoriten  L/R: Seite"
+                      : "Bestaetigen: Oeffnen  Zurueck  Quadrat: Playlist/Favoriten  L/R: Seite");
             ui_end();
             break;
         }
@@ -353,6 +583,25 @@ int main(void)
                         plugins_job_reset();
                         scr = scr_before_loading;
                     }
+                } else if (pending == PEND_APPEND) {
+                    PluginList more;
+                    plugins_take_list(&more);
+                    if (depth > 0) {
+                        Level *lv = &stack[depth - 1];
+                        plugins_list_append(&lv->list, &more, append_index);
+                        if (lv->cursor >= lv->list.count) lv->cursor = lv->list.count ? lv->list.count - 1 : 0;
+                    } else {
+                        plugins_list_free(&more);
+                    }
+                    scr = SCR_LIST;
+                } else if (pending == PEND_SAVE) {
+                    StreamInfo si;
+                    plugins_take_stream(&si);
+                    append_entry(save_job.file, &stack[depth - 1].list.items[save_job.idx[save_job.pos]], &si);
+                    save_job.ok++;
+                    save_job.pos++;
+                    start_save_next();
+                    break;
                 } else if (pending == PEND_PLAY) {
                     StreamInfo si;
                     plugins_take_stream(&si);
@@ -365,6 +614,11 @@ int main(void)
                     }
                 }
                 pending = PEND_NONE;
+            } else if (st == JOB_ERROR && pending == PEND_SAVE) {
+                plugins_job_reset();      /* einzelner Eintrag nicht auflösbar: weiter mit dem nächsten */
+                save_job.fail++;
+                save_job.pos++;
+                start_save_next();
             } else if (st == JOB_ERROR) {
                 char msg[300];
                 snprintf(msg, sizeof msg, "%s", plugins_job_error());
@@ -375,7 +629,14 @@ int main(void)
             } else {
                 ui_begin();
                 ui_header(pending_title, NULL);
-                ui_spinner(pending == PEND_PLAY ? "Stream wird ermittelt..." : "Lade...");
+                ui_spinner(pending == PEND_PLAY ? "Stream wird ermittelt..." :
+                           pending == PEND_SAVE ? "Wird gespeichert..." : "Lade...");
+                /* Fortschritt des Plugins (vs.log), z. B. beim Durchsuchen einer Website */
+                const char *lg = plugins_last_log();
+                if (lg[0] && pending != PEND_SAVE) {
+                    int w = ui_text_width(lg);
+                    ui_text_clipped(w < SCREEN_W - 40 ? (SCREEN_W - w) / 2 : 20, SCREEN_H / 2 + 100, SCREEN_W - 40, COL_DIM, lg);
+                }
                 ui_end();
             }
             break;
@@ -460,6 +721,7 @@ int main(void)
 
     player_close();
     stack_clear();
+    thumbs_shutdown();
     plugins_shutdown();
     net_term();
     config_save();

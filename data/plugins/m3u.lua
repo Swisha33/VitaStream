@@ -1,10 +1,11 @@
--- M3U-Playlists (IPTV-Listen, eigene Sammlungen).
+-- M3U-Playlists (eigene Listen, IPTV, Favoriten).
 -- Die Playlists stehen in ux0:data/VitaStream/playlists.txt, eine pro Zeile:
 --     Name|https://example.org/liste.m3u
 --     Lokale Liste|file:meine_liste.m3u      (Datei in ux0:data/VitaStream/)
--- Unterstuetzt #EXTINF mit group-title sowie #EXTVLCOPT:http-referrer / http-user-agent.
+-- Favoriten und eigene Playlists legt die App ueber die Quadrat-Taste an.
 
-local cache = {}   -- index -> geparste Playlist
+local m3u = require("m3ulib")
+local PAGE = 100
 
 local function read_playlists()
   local list = {}
@@ -18,136 +19,88 @@ local function read_playlists()
   return list
 end
 
-local function attr(s, key)
-  return s:match(key .. '="([^"]*)"')
-end
-
-local function parse_m3u(text)
-  local entries, groups, group_order = {}, {}, {}
-  local cur, opts = nil, {}
-  for raw in text:gmatch("[^\r\n]+") do
-    local line = raw:gsub("^%s+", ""):gsub("%s+$", "")
-    if line:match("^#EXTINF") then
-      local meta, title = line:match("^#EXTINF:[^ ,]*(.-),(.*)$")
-      cur = {
-        title = (title and #title > 0) and title or "Ohne Titel",
-        group = attr(meta or "", "group%-title") or "Allgemein",
-      }
-      opts = {}
-    elseif line:match("^#EXTVLCOPT:") then
-      local k, v = line:match("^#EXTVLCOPT:([^=]+)=(.*)$")
-      if k == "http-referrer" then opts.Referer = v
-      elseif k == "http-user-agent" then opts["User-Agent"] = v end
-    elseif line:match("^#EXTGRP:") and cur then
-      cur.group = line:sub(9)
-    elseif line ~= "" and not line:match("^#") then
-      local e = cur or { title = line:match("([^/]+)$") or line, group = "Allgemein" }
-      e.url = line
-      e.headers = opts
-      entries[#entries + 1] = e
-      if not groups[e.group] then
-        groups[e.group] = {}
-        group_order[#group_order + 1] = e.group
-      end
-      table.insert(groups[e.group], #entries)
-      cur, opts = nil, {}
-    end
+-- Gruppen einer Liste in Reihenfolge des Auftretens
+local function groups_of(entries)
+  local order, members = {}, {}
+  for _, e in ipairs(entries) do
+    local g = (e.group and #e.group > 0) and e.group or "Allgemein"
+    if not members[g] then members[g] = {}; order[#order + 1] = g end
+    table.insert(members[g], e)
   end
-  return { entries = entries, groups = groups, order = group_order }
+  return order, members
 end
 
-local function load(idx)
-  if cache[idx] then return cache[idx] end
-  local pl = read_playlists()[idx]
+local function load_idx(i)
+  local pl = read_playlists()[i]
   if not pl then return nil, "Playlist nicht gefunden" end
-  local text, err
-  if pl.url:match("^file:") then
-    text = vs.read_file(pl.url:sub(6))
-    if not text then err = "Datei nicht gefunden: " .. pl.url:sub(6) end
-  else
-    local status
-    text, status = vs.http_get(pl.url)
-    if not text then err = status
-    elseif status and status >= 400 then text, err = nil, "HTTP " .. status end
-  end
-  if not text then return nil, err end
-  cache[idx] = parse_m3u(text)
-  return cache[idx]
-end
-
-local function entry_item(idx, n, e)
-  return { title = e.title, subtitle = e.group, id = idx .. ":" .. n, kind = "video" }
-end
-
-local function list_entries(idx, p, indices)
-  local items = {}
-  for _, n in ipairs(indices) do items[#items + 1] = entry_item(idx, n, p.entries[n]) end
-  return items
+  return m3u.load(pl.url)
 end
 
 return {
-  name = "M3U-Playlists",
-  description = "IPTV- und eigene Listen aus playlists.txt",
+  name = "M3U-Playlists & Favoriten",
+  description = "Eigene Listen, Favoriten und IPTV-Listen aus playlists.txt",
 
   browse = function(id)
-    -- Startseite: alle Playlists
     if id == nil then
       local items = {}
       for i, pl in ipairs(read_playlists()) do
-        items[#items + 1] = { title = pl.name, subtitle = pl.url, id = "pl:" .. i, kind = "folder" }
+        local local_file = pl.url:match("^file:")
+        items[#items + 1] = { title = pl.name, kind = "folder", id = "pl:" .. i .. ":0",
+                              subtitle = local_file and "Eigene Playlist" or pl.url }
       end
-      if #items == 0 then return nil, "playlists.txt ist leer" end
+      if #items == 0 then return nil, "Noch keine Playlists - mit Quadrat Eintraege speichern" end
       return items
     end
 
-    local pidx = tonumber(id:match("^pl:(%d+)$"))
+    -- pl:<nr>:<offset>  oder  grp:<nr>:<gruppe>:<offset>
+    local pidx, off = id:match("^pl:(%d+):(%d+)$")
     if pidx then
-      local p, err = load(pidx)
-      if not p then return nil, err end
-      -- bei mehreren Gruppen erst die Gruppen zeigen
-      if #p.order > 1 then
+      local entries, err = load_idx(tonumber(pidx))
+      if not entries then return nil, err end
+      if #entries == 0 then return nil, "Playlist ist leer" end
+      local order, members = groups_of(entries)
+      if #order > 1 and #entries > 40 then
         local items = {}
-        for gi, g in ipairs(p.order) do
-          items[#items + 1] = { title = g, subtitle = #p.groups[g] .. " Eintraege",
-                                id = "grp:" .. pidx .. ":" .. gi, kind = "folder" }
+        for gi, g in ipairs(order) do
+          items[#items + 1] = { title = g, subtitle = #members[g] .. " Eintraege", kind = "folder",
+                                id = "grp:" .. pidx .. ":" .. gi .. ":0",
+                                thumb = members[g][1].logo }
         end
         return items
       end
-      return list_entries(pidx, p, p.groups[p.order[1]] or {})
+      return m3u.page(entries, tonumber(off), PAGE, function(n) return "pl:" .. pidx .. ":" .. n end)
     end
 
-    local gp, gi = id:match("^grp:(%d+):(%d+)$")
+    local gp, gi, goff = id:match("^grp:(%d+):(%d+):(%d+)$")
     if gp then
-      gp, gi = tonumber(gp), tonumber(gi)
-      local p, err = load(gp)
-      if not p then return nil, err end
-      return list_entries(gp, p, p.groups[p.order[gi]] or {})
+      local entries, err = load_idx(tonumber(gp))
+      if not entries then return nil, err end
+      local order, members = groups_of(entries)
+      local list = members[order[tonumber(gi)]] or {}
+      return m3u.page(list, tonumber(goff), PAGE, function(n) return "grp:" .. gp .. ":" .. gi .. ":" .. n end)
     end
     return nil, "Unbekannter Eintrag"
   end,
 
   -- Durchsucht alle Playlists nach Titeln
   search = function(query)
-    local q, items = query:lower(), {}
-    for i in ipairs(read_playlists()) do
-      local p = load(i)
-      if p then
-        for n, e in ipairs(p.entries) do
+    local q, hits = query:lower(), {}
+    for i, pl in ipairs(read_playlists()) do
+      local entries = load_idx(i)
+      if entries then
+        for _, e in ipairs(entries) do
           if e.title:lower():find(q, 1, true) then
-            items[#items + 1] = entry_item(i, n, e)
-            if #items >= 300 then return items end
+            hits[#hits + 1] = e
+            if #hits >= 500 then break end
           end
         end
       end
     end
+    if #hits == 0 then return nil, "Nichts gefunden fuer: " .. query end
+    local items = {}
+    for _, e in ipairs(hits) do items[#items + 1] = m3u.item(e) end
     return items
   end,
 
-  resolve = function(item)
-    local pidx, n = item.id:match("^(%d+):(%d+)$")
-    local p = load(tonumber(pidx))
-    local e = p and p.entries[tonumber(n)]
-    if not e then return nil, "Eintrag nicht mehr vorhanden" end
-    return { url = e.url, headers = e.headers }
-  end,
+  resolve = m3u.resolve_item,
 }

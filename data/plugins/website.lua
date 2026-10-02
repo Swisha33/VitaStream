@@ -58,7 +58,7 @@ local function extract_items(site, page, base)
     if not seen[abs] then
       seen[abs] = true
       title = vs.html_unescape((title or abs):gsub("<[^>]+>", ""))
-      items[#items + 1] = { title = trim(title), subtitle = abs, id = abs, kind = "video" }
+      items[#items + 1] = { title = trim(title), subtitle = abs, id = abs, kind = "video", thumb = "og:" .. abs }
     end
   end
   if #items == 0 then return nil, "Keine Eintraege gefunden - 'item'-Muster pruefen" end

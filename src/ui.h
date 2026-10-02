@@ -43,6 +43,14 @@ void ui_footer(const char *hints);
 typedef void (*ListLabelFn)(void *ctx, int i, const char **title, const char **sub);
 void ui_list(int count, int cursor, int *scroll, ListLabelFn fn, void *ctx);
 
+/* Liste mit Vorschaubild links (thumb = URL oder NULL -> Platzhalter mit Initialen) */
+typedef void (*ListThumbFn)(void *ctx, int i, const char **title, const char **sub, const char **thumb);
+void ui_list_thumbs(int count, int cursor, int *scroll, ListThumbFn fn, void *ctx);
+int  ui_list_thumbs_visible(void);
+
+/* Auswahlmenü (blockierend). Rückgabe: Index oder -1 bei Abbruch. */
+int  ui_menu(const char *title, const char **options, int count);
+
 /* Bildschirmtastatur (blockierend). Rückgabe 1 bei Bestätigung. */
 int  ui_input_text(const char *title, const char *initial, char *out, int outlen);
 
