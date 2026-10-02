@@ -1,5 +1,7 @@
 # VitaStream
 
+**Download:** [VitaStream.vpk (aktueller Build)](https://github.com/Swisha33/VitaStream/releases/download/nightly/VitaStream.vpk) – mit VitaShell installieren.
+
 Generischer Stream-Player für die PS Vita (HENkaku/Ensō) mit Lua-Quellen-Plugins,
 eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + eigener DNS, z. B. AdGuard).
 
@@ -107,10 +109,10 @@ Plugins laufen in einer Sandbox ohne `io`, `os`, `dofile`, `loadfile`. Alle Netz
 
 ## Bauen
 
-Mit installiertem [VitaSDK](https://vitasdk.org) (Pakete: `curl openssl zlib libvita2d libpng libjpeg-turbo`):
+Mit installiertem [VitaSDK](https://vitasdk.org) (Pakete: `curl-mbedtls mbedtls zstd zlib libvita2d libpng libjpeg-turbo`):
 
 ```sh
-cmake -S . -B build && cmake --build build
+cmake -S . -B build -DUSE_MBEDTLS=ON && cmake --build build
 # -> build/VitaStream.vpk
 ```
 
