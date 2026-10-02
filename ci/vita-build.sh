@@ -25,6 +25,12 @@ if [ ! -f $L/lib/libmbedtls.a ] || ! grep -rq "mbedtls" $L/lib/pkgconfig/libcurl
 fi
 USE_MBEDTLS=1
 
+# FFmpeg (aus dem Cache oder neu bauen)
+if [ ! -f ffmpeg-vita/lib/libavformat.a ]; then
+  echo "== FFmpeg bauen" | tee -a $LOG
+  ci/build-ffmpeg-vita.sh ffmpeg-vita > ffmpeg-build.log 2>&1 || { tail -40 ffmpeg-build.log >> $LOG; false; }
+fi
+
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${USE_MBEDTLS:+-DUSE_MBEDTLS=ON} 2>&1 | tee -a $LOG
 cmake --build build -j1 2>&1 | tee -a $LOG
 ls -la build/*.vpk | tee -a $LOG

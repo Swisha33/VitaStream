@@ -1,0 +1,12 @@
+# kommentar
+! auch
+ads.example.com
+0.0.0.0 tracker.net
+127.0.0.1 evil.org # x
+||adnet.io^
+||pathrule.com/foo^
+||opt.com^$third-party
+@@||good.adnet.io^
+0.0.0.0 localhost
+UPPER.Example.ORG
+

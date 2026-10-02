@@ -389,6 +389,7 @@ int main(void)
             if (in.pressed & SCE_CTRL_RIGHT)      player_seek_rel(10);
             if (in.pressed & SCE_CTRL_LTRIGGER)   player_seek_rel(-60);
             if (in.pressed & SCE_CTRL_RTRIGGER)   player_seek_rel(60);
+            if (in.pressed & SCE_CTRL_SELECT)     player_toggle_debug();
 
             int quit = (in.pressed & BTN_CANCEL) != 0;
             if (!quit && !player_active()) {
@@ -415,6 +416,7 @@ int main(void)
                 fmt_time(pos, a, sizeof a);
                 if (dur) { fmt_time(dur, b, sizeof b); snprintf(line, sizeof line, "%s / %s", a, b); }
                 else     snprintf(line, sizeof line, "%s  (Live)", a);
+                /* Fehlerdetails bleiben nach Ende sichtbar, siehe player_error() */
 
                 ui_rect(0, SCREEN_H - 70, SCREEN_W, 70, 0xB0000000);
                 if (dur) {
@@ -423,9 +425,9 @@ int main(void)
                     ui_rect(20, SCREEN_H - 60, w, 6, COL_ACCENT);
                 }
                 ui_text(20, SCREEN_H - 22, COL_TEXT, line);
-                ui_text_scaled(SCREEN_W - 560, SCREEN_H - 22, COL_DIM, 0.8f,
-                    player_paused() ? "PAUSE   Links/Rechts: 10 s   L/R: 60 s   Zurueck: Beenden"
-                                    : "Bestaetigen: Pause   Links/Rechts: 10 s   L/R: 60 s");
+                ui_text_scaled(SCREEN_W - 650, SCREEN_H - 22, COL_DIM, 0.8f,
+                    player_paused() ? "PAUSE   Links/Rechts: 10 s   L/R: 60 s   SELECT: Infos"
+                                    : "Bestaetigen: Pause   Links/Rechts: 10 s   L/R: 60 s   SELECT: Infos");
             }
             ui_end();
             break;

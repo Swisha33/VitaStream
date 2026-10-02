@@ -3,9 +3,8 @@
 
 #include <stdint.h>
 
-/* Wiedergabe über sceAvPlayer (Hardware-Dekodierung H.264/AAC).
- *  - MP4: Daten kommen über den eigenen Netzwerkstack (AdBlock + eigener DNS + Header).
- *  - HLS (.m3u8): URL wird direkt an sceAvPlayer übergeben (System-Netzwerk). */
+/* Wiedergabe: MP4 / HLS / MPEG-TS über den eigenen Netzwerkstack (AdBlock, DNS, Header),
+ * Demuxing mit FFmpeg, Video über den Hardware-Decoder (sceAvcdec), Ton über sceAudioOut. */
 
 int  player_open(const char *url, const char *headers);
 void player_close(void);
@@ -21,5 +20,6 @@ uint64_t player_position_ms(void);
 uint64_t player_duration_ms(void);
 
 const char *player_error(void);
+void player_toggle_debug(void);   /* Technische Infos ein/aus */
 
 #endif

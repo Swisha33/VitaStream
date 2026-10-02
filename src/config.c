@@ -43,7 +43,7 @@ static int copy_file(const char *src, const char *dst)
 void config_install_defaults(void)
 {
     static const char *files[] = {
-        "config.ini", "blocklist.txt", "sites.txt", "playlists.txt",
+        "config.ini", "blocklist.txt", "sites.txt", "playlists.txt", "cacert.pem",
         "plugins/json.lua", "plugins/direct.lua", "plugins/m3u.lua",
         "plugins/mediathek.lua", "plugins/website.lua",
     };

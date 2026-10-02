@@ -22,6 +22,7 @@ int net_check_url(const char *url) {
 }
 const char *net_strerror(int c) { return c == NET_BLOCKED ? "Durch AdBlock gesperrt" : "Netzwerkfehler"; }
 void net_buf_free(NetBuf *b) { free(b->data); b->data = NULL; b->len = 0; }
+const char *net_last_detail(void) { return ""; }
 
 int net_request(const char *url, const char *post, const char *hdr, NetBuf *out, long *status, char *final_url, int fl) {
     memset(out, 0, sizeof *out);

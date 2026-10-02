@@ -7,3 +7,9 @@ tests/test_plugins
 *.vpk
 *.self
 *.velf
+ffmpeg-vita/
+ffmpeg-src/
+ffmpeg-build.log
+ci.log
+tests/test_media
+tests/bl_media.txt

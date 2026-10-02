@@ -9,6 +9,7 @@
 #define NET_BLOCKED  -2   /* durch Blockliste oder DNS-Filter gesperrt */
 #define NET_DNS_FAIL -3
 #define NET_TLS      -4   /* Zertifikatsprüfung fehlgeschlagen */
+#define NET_ABORTED  -5
 
 typedef struct {
     char  *data;
@@ -36,6 +37,14 @@ int  net_request(const char *url, const char *post_body, const char *headers,
                  NetBuf *out, long *status, char *final_url, int final_len);
 void net_buf_free(NetBuf *b);
 
+/* Wie net_request; bricht ab, sobald *abort_flag != 0 wird (z. B. Player geschlossen). */
+int  net_request_ex(const char *url, const char *post_body, const char *headers,
+                    NetBuf *out, long *status, char *final_url, int final_len,
+                    const volatile int *abort_flag);
+
+/* Genauere Beschreibung des letzten Fehlers im aufrufenden Thread (curl-Text, Host ...) */
+const char *net_last_detail(void);
+
 /* Prüft eine URL gegen Blockliste/DNS-Filter, ohne sie zu laden. */
 int  net_check_url(const char *url);
 
@@ -46,6 +55,7 @@ NetStream *net_stream_open(const char *url, const char *headers);
 uint64_t   net_stream_size(NetStream *s);
 int        net_stream_read(NetStream *s, uint64_t offset, void *buf, uint32_t len);
 void       net_stream_close(NetStream *s);
+void       net_stream_abort(NetStream *s);   /* laufende/künftige Lesevorgänge abbrechen */
 
 const char *net_strerror(int code);
 

@@ -19,6 +19,26 @@
 
 NetStats g_net_stats;
 
+/* Fehlerdetails pro Thread (Plugin-Worker und Player laufen parallel) */
+static pthread_key_t  s_err_key;
+static pthread_once_t s_err_once = PTHREAD_ONCE_INIT;
+static void err_key_init(void) { pthread_key_create(&s_err_key, free); }
+
+static void set_detail(const char *fmt, const char *a, long b)
+{
+    pthread_once(&s_err_once, err_key_init);
+    char *buf = pthread_getspecific(s_err_key);
+    if (!buf) { buf = malloc(200); pthread_setspecific(s_err_key, buf); }
+    if (buf) snprintf(buf, 200, fmt, a, b);
+}
+
+const char *net_last_detail(void)
+{
+    pthread_once(&s_err_once, err_key_init);
+    const char *buf = pthread_getspecific(s_err_key);
+    return buf ? buf : "";
+}
+
 #define CA_FILE   VS_DATA_DIR "/cacert.pem"
 #define MAX_REDIR 8
 
@@ -76,6 +96,7 @@ const char *net_strerror(int code)
     case NET_BLOCKED:  return "Durch AdBlock gesperrt";
     case NET_DNS_FAIL: return "DNS-Aufloesung fehlgeschlagen";
     case NET_TLS:      return "TLS-Zertifikat ungueltig (cacert.pem ablegen oder ssl_verify=0)";
+    case NET_ABORTED:  return "Abgebrochen";
     default:           return "Netzwerkfehler";
     }
 }
@@ -98,6 +119,21 @@ static size_t write_cb(char *ptr, size_t sz, size_t nm, void *ud)
     b->len += n;
     b->data[b->len] = 0;
     return n;
+}
+
+static int xferinfo_cb(void *ud, curl_off_t dt, curl_off_t dn, curl_off_t ut, curl_off_t un)
+{
+    (void)dt; (void)dn; (void)ut; (void)un;
+    const volatile int *abort_flag = ud;
+    return (abort_flag && *abort_flag) ? 1 : 0;
+}
+
+static void set_abort(CURL *c, const volatile int *abort_flag)
+{
+    if (!abort_flag) return;
+    curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
+    curl_easy_setopt(c, CURLOPT_XFERINFODATA, (void *)abort_flag);
 }
 
 static int url_port(const char *url)
@@ -126,16 +162,18 @@ static int prepare_host(const char *url, char *resolve_entry, int len)
     if (!adblock_host_from_url(url, host, sizeof host)) return NET_ERR;
 
     if (g_cfg.adblock_enabled && adblock_is_blocked(host)) {
+        set_detail("%s (Blockliste)", host, 0);
         note_blocked(host);
         return NET_BLOCKED;
     }
     if (g_cfg.custom_dns_enabled) {
         char ip[16];
         int r = dns_resolve2(g_cfg.dns_primary, g_cfg.dns_secondary, host, ip, sizeof ip, 3000);
-        if (r == DNS_BLOCKED) { note_blocked(host); return NET_BLOCKED; }
+        if (r == DNS_BLOCKED) { set_detail("%s (DNS-Filter)", host, 0); note_blocked(host); return NET_BLOCKED; }
         if (r == DNS_OK) {
             if (strcmp(ip, host)) snprintf(resolve_entry, len, "%s:%d:%s", host, url_port(url), ip);
         } else if (r == DNS_ERR_NXDOM || r == DNS_ERR_NOA) {
+            set_detail("%s nicht gefunden", host, 0);
             return NET_DNS_FAIL;
         }
         /* DNS_ERR_NET: eigener DNS nicht erreichbar -> System-DNS als Rückfall */
@@ -185,6 +223,13 @@ static void common_opts(CURL *c, const char *url)
 int net_request(const char *url_in, const char *post_body, const char *headers,
                 NetBuf *out, long *status, char *final_url, int final_len)
 {
+    return net_request_ex(url_in, post_body, headers, out, status, final_url, final_len, NULL);
+}
+
+int net_request_ex(const char *url_in, const char *post_body, const char *headers,
+                   NetBuf *out, long *status, char *final_url, int final_len,
+                   const volatile int *abort_flag)
+{
     memset(out, 0, sizeof *out);
     if (status) *status = 0;
 
@@ -213,6 +258,7 @@ int net_request(const char *url_in, const char *post_body, const char *headers,
         net_buf_free(out);
         curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_cb);
         curl_easy_setopt(c, CURLOPT_WRITEDATA, out);
+        set_abort(c, abort_flag);
 
         g_net_stats.requests++;
         CURLcode cr = curl_easy_perform(c);
@@ -226,6 +272,8 @@ int net_request(const char *url_in, const char *post_body, const char *headers,
         curl_slist_free_all(hl);
         curl_easy_cleanup(c);
 
+        if (cr != CURLE_OK) set_detail("%s (curl %ld)", curl_easy_strerror(cr), (long)cr);
+        if (cr == CURLE_ABORTED_BY_CALLBACK) { result = NET_ABORTED; break; }
         if (cr == CURLE_PEER_FAILED_VERIFICATION || cr == CURLE_SSL_CACERT_BADFILE) { result = NET_TLS; break; }
         if (cr != CURLE_OK) { result = NET_ERR; break; }
         if (status) *status = code;
@@ -247,7 +295,7 @@ int net_request(const char *url_in, const char *post_body, const char *headers,
 
 /* ---------------- Bereichs-Stream ---------------- */
 
-#define WINDOW (512 * 1024)
+#define WINDOW (1024 * 1024)
 
 struct NetStream {
     char           *url;
@@ -258,7 +306,10 @@ struct NetStream {
     NetBuf          win;
     CURL           *curl;
     pthread_mutex_t lock;
+    volatile int    abort;
 };
+
+void net_stream_abort(NetStream *s) { if (s) s->abort = 1; }
 
 typedef struct { uint64_t total; } HdrInfo;
 
@@ -287,6 +338,7 @@ static int stream_fetch(NetStream *s, uint64_t off, uint64_t want, NetBuf *out, 
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 15L);
     curl_easy_setopt(c, CURLOPT_RANGE, range);
+    set_abort(c, &s->abort);
 
     struct curl_slist *rl = NULL, *hl = build_headers(s->headers);
     if (s->resolve[0]) { rl = curl_slist_append(NULL, s->resolve); curl_easy_setopt(c, CURLOPT_RESOLVE, rl); }
@@ -306,7 +358,12 @@ static int stream_fetch(NetStream *s, uint64_t off, uint64_t want, NetBuf *out, 
     curl_slist_free_all(hl);
     g_net_stats.requests++;
 
-    if (cr != CURLE_OK || (code != 206 && code != 200)) { net_buf_free(out); return NET_ERR; }
+    if (cr != CURLE_OK || (code != 206 && code != 200)) {
+        if (cr != CURLE_OK) set_detail("%s (curl %ld)", curl_easy_strerror(cr), (long)cr);
+        else                set_detail("HTTP %s%ld", "", code);
+        net_buf_free(out);
+        return NET_ERR;
+    }
     if (code == 200 && off > 0) { net_buf_free(out); return NET_ERR; } /* Server kann keine Ranges */
     return NET_OK;
 }
@@ -321,7 +378,13 @@ NetStream *net_stream_open(const char *url_in, const char *headers)
     snprintf(hdr2, sizeof hdr2, "%s%sRange: bytes=0-0", headers ? headers : "", headers ? "\n" : "");
     int r = net_request(url_in, NULL, hdr2, &probe, &st, final_url, sizeof final_url);
     net_buf_free(&probe);
-    if (r != NET_OK) return NULL;
+    if (r != NET_OK) {
+        char msg[64];
+        snprintf(msg, sizeof msg, "%s", net_strerror(r));
+        if (!*net_last_detail()) set_detail("%s", msg, 0);
+        return NULL;
+    }
+    if (st >= 400) { set_detail("HTTP %s%ld", "", st); return NULL; }
 
     NetStream *s = calloc(1, sizeof *s);
     s->url = strdup(final_url);
@@ -369,7 +432,7 @@ int net_stream_read(NetStream *s, uint64_t offset, void *buf, uint32_t len)
         uint64_t want = (len - done) > WINDOW ? (len - done) : WINDOW;
         if (pos + want > s->size) want = s->size - pos;
         int ok = NET_ERR;
-        for (int attempt = 0; attempt < 3 && ok != NET_OK; attempt++)
+        for (int attempt = 0; attempt < 3 && ok != NET_OK && !s->abort; attempt++)
             ok = stream_fetch(s, pos, want, &s->win, NULL);
         if (ok != NET_OK || s->win.len == 0) break;
         s->win_off = pos;

@@ -13,7 +13,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "VitaStream")
 set(VITA_TITLEID  "VSTR00001")
-set(VITA_VERSION  "00.10")
+set(VITA_VERSION  "00.20")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall -Wno-unused-function")
@@ -34,7 +34,18 @@ add_executable(${PROJECT_NAME}
   src/net.c
   src/plugins.c
   src/player.c
+  src/media.c
+  src/hls.c
+  src/vdec_vita.c
+  src/aout_vita.c
 )
+
+# Minimal-FFmpeg (Demuxer + Audio-Decoder), gebaut von ci/build-ffmpeg-vita.sh
+set(FFMPEG_DIR "${CMAKE_SOURCE_DIR}/ffmpeg-vita" CACHE PATH "FFmpeg-Installationsverzeichnis")
+if(NOT EXISTS "${FFMPEG_DIR}/lib/libavformat.a")
+  message(FATAL_ERROR "FFmpeg fehlt: zuerst ci/build-ffmpeg-vita.sh ausfuehren (FFMPEG_DIR=${FFMPEG_DIR})")
+endif()
+target_include_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/include")
 
 option(USE_MBEDTLS "curl mit mbedTLS statt OpenSSL linken" OFF)
 if(USE_MBEDTLS)
@@ -45,10 +56,15 @@ endif()
 
 target_link_libraries(${PROJECT_NAME}
   lua_vendored
+  ${FFMPEG_DIR}/lib/libavformat.a
+  ${FFMPEG_DIR}/lib/libavcodec.a
+  ${FFMPEG_DIR}/lib/libswresample.a
+  ${FFMPEG_DIR}/lib/libavutil.a
   curl ${TLS_LIBS} zstd
   vita2d
   png jpeg z
-  SceAvPlayer_stub
+  SceVideodec_stub
+  ScePower_stub
   SceAudio_stub
   SceAppUtil_stub
   SceCommonDialog_stub
@@ -84,6 +100,7 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE data/plugins/mediathek.lua data/plugins/mediathek.lua
   FILE data/plugins/website.lua data/plugins/website.lua
   FILE data/config.ini data/config.ini
+  FILE data/cacert.pem data/cacert.pem
   FILE data/blocklist.txt data/blocklist.txt
   FILE data/sites.txt data/sites.txt
   FILE data/playlists.txt data/playlists.txt

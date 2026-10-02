@@ -36,7 +36,9 @@ static int l_http(lua_State *ls, int is_post)
     int r = net_request(url, body, hdr, &b, &status, final_url, sizeof final_url);
     if (r != NET_OK) {
         lua_pushnil(ls);
-        lua_pushstring(ls, net_strerror(r));
+        const char *d = net_last_detail();
+        if (d && *d) lua_pushfstring(ls, "%s: %s", net_strerror(r), d);
+        else         lua_pushstring(ls, net_strerror(r));
         return 2;
     }
     lua_pushlstring(ls, b.data ? b.data : "", b.len);

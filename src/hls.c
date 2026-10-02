@@ -1,0 +1,432 @@
+#include "hls.h"
+#include "net.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <time.h>
+#include <unistd.h>
+
+#define MAX_W 1280
+#define MAX_H 720
+
+typedef struct {
+    char   *uri;
+    double  duration;
+    int64_t seq;
+    int64_t br_off, br_len;   /* EXT-X-BYTERANGE, br_len < 0 = ganzes Segment */
+} Segment;
+
+struct Hls {
+    char     *headers;
+    const volatile int *abort_flag;
+    char      media_url[2048];
+    Segment  *seg;
+    int       nseg, capseg;
+    double    target_duration;
+    int       endlist;
+    char     *map_uri;           /* fMP4-Init-Segment */
+    int64_t   map_off, map_len;
+    int       need_map;
+    int       cur;               /* Index des nächsten zu ladenden Segments */
+    int64_t   last_seq;          /* zuletzt geladene Sequenznummer (Live) */
+    NetBuf    buf;
+    size_t    pos;
+    char      info[96];
+    char      err[160];
+};
+
+/* ---------------------------------------------------------------- Hilfen */
+
+static void sleep_ms(int ms) { usleep(ms * 1000); }
+
+static int aborted(const Hls *h) { return h->abort_flag && *h->abort_flag; }
+
+void hls_join_url(const char *base, const char *ref, char *out, int outlen)
+{
+    if (strstr(ref, "://")) { snprintf(out, outlen, "%s", ref); return; }
+    const char *scheme_end = strstr(base, "://");
+    if (!scheme_end) { snprintf(out, outlen, "%s", ref); return; }
+    if (ref[0] == '/' && ref[1] == '/') {          /* protokollrelativ */
+        snprintf(out, outlen, "%.*s:%s", (int)(scheme_end - base), base, ref);
+        return;
+    }
+    const char *host_start = scheme_end + 3;
+    const char *path_start = host_start + strcspn(host_start, "/?#");
+    if (ref[0] == '/') {
+        snprintf(out, outlen, "%.*s%s", (int)(path_start - base), base, ref);
+        return;
+    }
+    /* relativ zum Verzeichnis der Basis (Query der Basis ignorieren) */
+    const char *q = base + strcspn(base, "?#");
+    const char *slash = q;
+    while (slash > path_start && slash[-1] != '/') slash--;
+    if (slash <= path_start) snprintf(out, outlen, "%.*s/%s", (int)(path_start - base), base, ref);
+    else                     snprintf(out, outlen, "%.*s%s", (int)(slash - base), base, ref);
+
+    /* "./" und "../" auflösen */
+    char *p;
+    while ((p = strstr(out, "/./"))) memmove(p, p + 2, strlen(p + 2) + 1);
+    while ((p = strstr(out, "/../"))) {
+        char *prev = p;
+        char *min = strstr(out, "://");
+        min = min ? strchr(min + 3, '/') : out;
+        if (!min || p <= min) break;
+        do { prev--; } while (prev > min && *prev != '/');
+        memmove(prev, p + 3, strlen(p + 3) + 1);
+    }
+}
+
+static const char *attr(const char *line, const char *key, char *out, int outlen)
+{
+    /* Attribute-Liste: KEY=VALUE,KEY="VALUE",... */
+    size_t kl = strlen(key);
+    const char *p = line;
+    while ((p = strstr(p, key))) {
+        if ((p == line || p[-1] == ',' || p[-1] == ':') && p[kl] == '=') {
+            p += kl + 1;
+            int n = 0;
+            if (*p == '"') {
+                p++;
+                while (*p && *p != '"' && n < outlen - 1) out[n++] = *p++;
+            } else {
+                while (*p && *p != ',' && *p != '\r' && *p != '\n' && n < outlen - 1) out[n++] = *p++;
+            }
+            out[n] = 0;
+            return out;
+        }
+        p += kl;
+    }
+    return NULL;
+}
+
+static char *fetch(Hls *h, const char *url, long *status_out, char *final_url, int final_len)
+{
+    NetBuf b;
+    long status = 0;
+    int r = net_request_ex(url, NULL, h->headers, &b, &status, final_url, final_len, h->abort_flag);
+    if (status_out) *status_out = status;
+    if (r != NET_OK) {
+        snprintf(h->err, sizeof h->err, "%s: %s", net_strerror(r), net_last_detail());
+        return NULL;
+    }
+    if (status >= 400) {
+        snprintf(h->err, sizeof h->err, "HTTP %ld beim Laden der Playlist", status);
+        net_buf_free(&b);
+        return NULL;
+    }
+    return b.data ? b.data : strdup("");
+}
+
+static void free_segments(Hls *h)
+{
+    for (int i = 0; i < h->nseg; i++) free(h->seg[i].uri);
+    h->nseg = 0;
+}
+
+/* ---------------------------------------------------------------- Master */
+
+typedef struct { char uri[2048]; long bw; int w, h; int ok; } Variant;
+
+static int choose_variant(Hls *h, const char *text, const char *base, char *out, int outlen)
+{
+    Variant best = {0}, fallback = {0};
+    int found = 0;
+    const char *p = text;
+    while (*p) {
+        const char *eol = p + strcspn(p, "\r\n");
+        if (!strncmp(p, "#EXT-X-STREAM-INF:", 18)) {
+            char line[1024], v[256];
+            snprintf(line, sizeof line, "%.*s", (int)(eol - p), p);
+            Variant cand = {0};
+            cand.bw = attr(line, "BANDWIDTH", v, sizeof v) ? atol(v) : 0;
+            if (attr(line, "RESOLUTION", v, sizeof v)) sscanf(v, "%dx%d", &cand.w, &cand.h);
+            cand.ok = 1;
+            if (attr(line, "CODECS", v, sizeof v)) {
+                for (char *c = v; *c; c++) *c = (char)tolower((unsigned char)*c);
+                if (strstr(v, "hvc1") || strstr(v, "hev1") || strstr(v, "av01") || strstr(v, "vp09"))
+                    cand.ok = 0;      /* Codec kann die Vita nicht */
+            }
+            /* nächste URI-Zeile */
+            const char *q = eol;
+            while (*q) {
+                q += strspn(q, "\r\n");
+                const char *e = q + strcspn(q, "\r\n");
+                if (e > q && *q != '#') {
+                    char ref[2048];
+                    snprintf(ref, sizeof ref, "%.*s", (int)(e - q), q);
+                    hls_join_url(base, ref, cand.uri, sizeof cand.uri);
+                    break;
+                }
+                q = e;
+            }
+            if (cand.uri[0] && cand.ok) {
+                found = 1;
+                int fits = cand.h ? (cand.w <= MAX_W && cand.h <= MAX_H) : (cand.bw <= 4000000);
+                if (fits) {
+                    if (!best.uri[0] || cand.bw > best.bw) best = cand;
+                } else if (!fallback.uri[0] || (cand.h && cand.h < fallback.h) || (!cand.h && cand.bw < fallback.bw)) {
+                    fallback = cand;
+                }
+            }
+        }
+        p = eol + strspn(eol, "\r\n");
+    }
+    if (!found) {
+        snprintf(h->err, sizeof h->err, "Keine abspielbare Qualitaet (nur HEVC/AV1?)");
+        return -1;
+    }
+    Variant *v = best.uri[0] ? &best : &fallback;
+    snprintf(out, outlen, "%s", v->uri);
+    if (v->h) snprintf(h->info, sizeof h->info, "%dx%d, %.1f Mbit/s", v->w, v->h, v->bw / 1e6);
+    else      snprintf(h->info, sizeof h->info, "%.1f Mbit/s", v->bw / 1e6);
+    return 0;
+}
+
+/* ---------------------------------------------------------------- Media-Playlist */
+
+static int parse_media(Hls *h, const char *text, const char *base)
+{
+    free_segments(h);
+    h->endlist = 0;
+    h->target_duration = 6;
+    int64_t seq = 0;
+    double dur = 0;
+    int64_t br_off = 0, br_len = -1, next_off = 0;
+    int have_br = 0;
+    const char *p = text;
+    while (*p) {
+        const char *eol = p + strcspn(p, "\r\n");
+        char line[2048];
+        snprintf(line, sizeof line, "%.*s", (int)(eol - p), p);
+        if (!strncmp(line, "#EXT-X-TARGETDURATION:", 22)) {
+            h->target_duration = atof(line + 22);
+        } else if (!strncmp(line, "#EXT-X-MEDIA-SEQUENCE:", 22)) {
+            seq = atoll(line + 22);
+        } else if (!strncmp(line, "#EXTINF:", 8)) {
+            dur = atof(line + 8);
+        } else if (!strncmp(line, "#EXT-X-BYTERANGE:", 17)) {
+            br_len = atoll(line + 17);
+            const char *at = strchr(line + 17, '@');
+            br_off = at ? atoll(at + 1) : next_off;
+            have_br = 1;
+        } else if (!strncmp(line, "#EXT-X-ENDLIST", 14)) {
+            h->endlist = 1;
+        } else if (!strncmp(line, "#EXT-X-KEY:", 11)) {
+            char v[64];
+            if (attr(line + 11, "METHOD", v, sizeof v) && strcmp(v, "NONE")) {
+                snprintf(h->err, sizeof h->err, "Verschluesselter Stream (%s) wird nicht unterstuetzt", v);
+                return -1;
+            }
+        } else if (!strncmp(line, "#EXT-X-MAP:", 11)) {
+            char v[2048], abs_uri[2048];
+            if (attr(line + 11, "URI", v, sizeof v)) {
+                hls_join_url(base, v, abs_uri, sizeof abs_uri);
+                if (!h->map_uri || strcmp(h->map_uri, abs_uri)) {
+                    free(h->map_uri);
+                    h->map_uri = strdup(abs_uri);
+                    h->need_map = 1;
+                }
+                h->map_len = -1;
+                if (attr(line + 11, "BYTERANGE", v, sizeof v)) {
+                    h->map_len = atoll(v);
+                    const char *at = strchr(v, '@');
+                    h->map_off = at ? atoll(at + 1) : 0;
+                }
+            }
+        } else if (!strncmp(line, "#EXT-X-STREAM-INF:", 18)) {
+            return 1;   /* doch eine Master-Playlist */
+        } else if (line[0] && line[0] != '#') {
+            if (h->nseg == h->capseg) {
+                h->capseg = h->capseg ? h->capseg * 2 : 64;
+                h->seg = realloc(h->seg, sizeof(Segment) * h->capseg);
+            }
+            Segment *s = &h->seg[h->nseg++];
+            char abs_uri[2048];
+            hls_join_url(base, line, abs_uri, sizeof abs_uri);
+            s->uri = strdup(abs_uri);
+            s->duration = dur > 0 ? dur : h->target_duration;
+            s->seq = seq++;
+            s->br_len = have_br ? br_len : -1;
+            s->br_off = have_br ? br_off : 0;
+            if (have_br) next_off = br_off + br_len;
+            have_br = 0;
+            dur = 0;
+        }
+        p = eol + strspn(eol, "\r\n");
+    }
+    if (h->nseg == 0) {
+        snprintf(h->err, sizeof h->err, "Playlist enthaelt keine Segmente");
+        return -1;
+    }
+    return 0;
+}
+
+static int load_media(Hls *h)
+{
+    char final_url[2048];
+    char *text = fetch(h, h->media_url, NULL, final_url, sizeof final_url);
+    if (!text) return -1;
+    int r = parse_media(h, text, final_url);
+    free(text);
+    return r;
+}
+
+/* ---------------------------------------------------------------- API */
+
+Hls *hls_open(const char *url, const char *headers, const volatile int *abort_flag, char *err, int errlen)
+{
+    Hls *h = calloc(1, sizeof *h);
+    h->headers = headers && *headers ? strdup(headers) : NULL;
+    h->abort_flag = abort_flag;
+    snprintf(h->media_url, sizeof h->media_url, "%s", url);
+
+    char final_url[2048];
+    char *text = fetch(h, url, NULL, final_url, sizeof final_url);
+    if (!text) goto fail;
+    if (strncmp(text + strspn(text, " \t\r\n\xEF\xBB\xBF"), "#EXTM3U", 7)) {
+        snprintf(h->err, sizeof h->err, "Keine HLS-Playlist");
+        free(text);
+        goto fail;
+    }
+
+    int r = parse_media(h, text, final_url);
+    if (r == 1) {   /* Master-Playlist -> Variante wählen */
+        h->err[0] = 0;
+        if (choose_variant(h, text, final_url, h->media_url, sizeof h->media_url) < 0) { free(text); goto fail; }
+        free(text);
+        if (load_media(h) != 0) goto fail;
+    } else {
+        free(text);
+        if (r < 0) goto fail;
+        snprintf(h->media_url, sizeof h->media_url, "%s", final_url);
+    }
+
+    if (!h->endlist) {
+        /* Live: ein paar Segmente vor dem Ende beginnen */
+        h->cur = h->nseg > 3 ? h->nseg - 3 : 0;
+    }
+    h->last_seq = h->seg[h->cur].seq - 1;
+    return h;
+
+fail:
+    if (err) snprintf(err, errlen, "%s", h->err[0] ? h->err : "HLS-Fehler");
+    hls_close(h);
+    return NULL;
+}
+
+void hls_close(Hls *h)
+{
+    if (!h) return;
+    free_segments(h);
+    free(h->seg);
+    free(h->map_uri);
+    free(h->headers);
+    net_buf_free(&h->buf);
+    free(h);
+}
+
+static int download(Hls *h, const char *uri, int64_t off, int64_t len)
+{
+    char hdr[1400];
+    const char *headers = h->headers;
+    if (len >= 0) {
+        snprintf(hdr, sizeof hdr, "%s%sRange: bytes=%lld-%lld", h->headers ? h->headers : "",
+                 h->headers ? "\n" : "", (long long)off, (long long)(off + len - 1));
+        headers = hdr;
+    }
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (aborted(h)) return -1;
+        net_buf_free(&h->buf);
+        long status = 0;
+        int r = net_request_ex(uri, NULL, headers, &h->buf, &status, NULL, 0, h->abort_flag);
+        if (r == NET_OK && status < 400) { h->pos = 0; return 0; }
+        if (r == NET_OK) snprintf(h->err, sizeof h->err, "HTTP %ld bei Segment", status);
+        else             snprintf(h->err, sizeof h->err, "%s: %s", net_strerror(r), net_last_detail());
+        if (r == NET_BLOCKED || r == NET_ABORTED || status == 404 || status == 403) break;
+        sleep_ms(500);
+    }
+    net_buf_free(&h->buf);
+    return -1;
+}
+
+/* Lädt das nächste Segment (oder das Init-Segment) in h->buf. 0 = ok, 1 = Ende, -1 = Fehler */
+static int next_chunk(Hls *h)
+{
+    if (h->need_map && h->map_uri) {
+        h->need_map = 0;
+        return download(h, h->map_uri, h->map_off, h->map_len) == 0 ? 0 : -1;
+    }
+    for (;;) {
+        if (aborted(h)) return -1;
+        if (h->cur < h->nseg) {
+            Segment *s = &h->seg[h->cur++];
+            h->last_seq = s->seq;
+            if (download(h, s->uri, s->br_off, s->br_len) == 0) return 0;
+            if (!h->endlist) continue;      /* Live: fehlendes Segment überspringen */
+            return -1;
+        }
+        if (h->endlist) return 1;
+
+        /* Live: Playlist neu laden, bis neue Segmente da sind */
+        int wait_ms = (int)(h->target_duration * 500);
+        if (wait_ms < 1000) wait_ms = 1000;
+        for (int t = 0; t < wait_ms && !aborted(h); t += 100) sleep_ms(100);
+        if (aborted(h)) return -1;
+        int64_t want = h->last_seq + 1;
+        int failures = 0;
+        while (load_media(h) != 0) {
+            if (aborted(h) || ++failures >= 5) return -1;
+            sleep_ms(1000);
+        }
+        h->cur = h->nseg;
+        for (int i = 0; i < h->nseg; i++)
+            if (h->seg[i].seq >= want) { h->cur = i; break; }
+        /* Zu weit zurückgefallen: Sequenz nicht mehr in der Liste -> am Ende weitermachen */
+        if (h->nseg && h->seg[0].seq > want) h->cur = h->nseg > 3 ? h->nseg - 3 : 0;
+    }
+}
+
+int hls_read(Hls *h, uint8_t *dst, int size)
+{
+    while (!h->buf.data || h->pos >= h->buf.len) {
+        int r = next_chunk(h);
+        if (r == 1) return 0;
+        if (r < 0) return -1;
+    }
+    size_t n = h->buf.len - h->pos;
+    if (n > (size_t)size) n = size;
+    memcpy(dst, h->buf.data + h->pos, n);
+    h->pos += n;
+    return (int)n;
+}
+
+int hls_is_live(const Hls *h) { return !h->endlist; }
+
+int64_t hls_duration_us(const Hls *h)
+{
+    if (!h->endlist) return 0;
+    double d = 0;
+    for (int i = 0; i < h->nseg; i++) d += h->seg[i].duration;
+    return (int64_t)(d * 1e6);
+}
+
+int64_t hls_seek(Hls *h, int64_t time_us)
+{
+    if (!h->endlist) return -1;
+    double t = 0, target = time_us / 1e6;
+    int idx = 0;
+    for (; idx < h->nseg - 1; idx++) {
+        if (t + h->seg[idx].duration > target) break;
+        t += h->seg[idx].duration;
+    }
+    h->cur = idx;
+    h->need_map = h->map_uri != NULL;
+    net_buf_free(&h->buf);
+    h->pos = 0;
+    return (int64_t)(t * 1e6);
+}
+
+const char *hls_info(const Hls *h)  { return h->info; }
+const char *hls_error(const Hls *h) { return h->err; }
