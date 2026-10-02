@@ -28,3 +28,24 @@ jobs:
         with:
           name: VitaStream-vpk
           path: build/VitaStream.vpk
+
+  # Bei jedem Push auf main: VPK als Release "nightly" veroeffentlichen (direkter Download-Link)
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [vita, host-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: VitaStream-vpk
+      - name: Release aktualisieren
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete nightly --yes --cleanup-tag || true
+          gh release create nightly VitaStream.vpk --prerelease --target "$GITHUB_SHA" \
+            --title "VitaStream (aktueller Build)" \
+            --notes "Automatisch gebaut aus ${GITHUB_SHA::7}. VPK mit VitaShell installieren."
