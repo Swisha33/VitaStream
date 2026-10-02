@@ -20,10 +20,10 @@ L=$VITASDK/arm-vita-eabi
 # curl aus vdpm ist gegen OpenSSL 1.0.2 gebaut; liegt eine andere Version vor, passende nachinstallieren
 if ! grep -q "OpenSSL 1.0.2" $L/include/openssl/opensslv.h 2>/dev/null; then
   echo "== OpenSSL 1.0.2 nachinstallieren" | tee -a $LOG
-  vdpm openssl 2>&1 | tee -a $LOG || { echo "vdpm openssl fehlgeschlagen, versuche curl-mbedtls" | tee -a $LOG; USE_MBEDTLS=1; }
+  yes y | vdpm openssl 2>&1 | tee -a $LOG || { echo "vdpm openssl fehlgeschlagen, versuche curl-mbedtls" | tee -a $LOG; USE_MBEDTLS=1; }
 fi
 if [ -n "$USE_MBEDTLS" ]; then
-  vdpm mbedtls curl-mbedtls 2>&1 | tee -a $LOG
+  yes y | vdpm mbedtls curl-mbedtls 2>&1 | tee -a $LOG
 fi
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${USE_MBEDTLS:+-DUSE_MBEDTLS=ON} 2>&1 | tee -a $LOG
