@@ -17,14 +17,13 @@ L=$VITASDK/arm-vita-eabi
   grep -h "define OPENSSL_VERSION_TEXT" $L/include/openssl/opensslv.h 2>/dev/null | head -2 || true
 } 2>&1 | tee -a $LOG
 
-# curl aus vdpm ist gegen OpenSSL 1.0.2 gebaut; liegt eine andere Version vor, passende nachinstallieren
-if ! grep -q "OpenSSL 1.0.2" $L/include/openssl/opensslv.h 2>/dev/null; then
-  echo "== OpenSSL 1.0.2 nachinstallieren" | tee -a $LOG
-  yes y | vdpm openssl 2>&1 | tee -a $LOG || { echo "vdpm openssl fehlgeschlagen, versuche curl-mbedtls" | tee -a $LOG; USE_MBEDTLS=1; }
+# Das curl-Paket im Container passt nicht zum installierten OpenSSL 1.1.1 und laesst
+# sich nicht sauber tauschen. curl mit mbedTLS ist konfliktfrei und unterstuetzt TLS 1.2/1.3.
+if [ ! -f $L/lib/libmbedtls.a ] || ! grep -rq "mbedtls" $L/lib/pkgconfig/libcurl.pc 2>/dev/null; then
+  echo "== curl-mbedtls installieren" | tee -a $LOG
+  vdpm mbedtls curl-mbedtls < <(yes y) 2>&1 | tee -a $LOG
 fi
-if [ -n "$USE_MBEDTLS" ]; then
-  yes y | vdpm mbedtls curl-mbedtls 2>&1 | tee -a $LOG
-fi
+USE_MBEDTLS=1
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${USE_MBEDTLS:+-DUSE_MBEDTLS=ON} 2>&1 | tee -a $LOG
 cmake --build build -j1 2>&1 | tee -a $LOG
