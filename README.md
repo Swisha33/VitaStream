@@ -131,9 +131,8 @@ LUA_SRC=./lua tests/run_tests.sh
 ## Technische Hinweise & Grenzen
 
 - **Formate:** Die Vita dekodiert H.264 per Hardware bis 1280×720. 1080p-Streams lassen sich nicht abspielen (bei HLS wird automatisch ≤720p gewählt). SD-Streams, die der Hardware-Decoder ablehnt (z. B. Interlaced-TV), laufen per Software. HEVC, VP9, AV1 und DRM (Widevine/SAMPLE-AES) gehen nicht.
-- **MP4** wird über den eigenen Netzwerkstack (curl, Range-Anfragen mit 512-KB-Puffer) gelesen – AdBlock, DNS und Header gelten vollständig.
-- **HLS (.m3u8)** wird direkt an `sceAvPlayer` übergeben und nutzt dabei den System-DNS; Plugin-Seiten, Weiterleitungen und die Stream-URL selbst werden vorher trotzdem gegen die Blockliste geprüft. Benötigt ein HLS-Stream spezielle Header (Referer), kann die Wiedergabe scheitern – ein lokaler HLS-Proxy wäre der nächste Ausbauschritt.
-- Ungetestet auf echter Hardware: dieser Stand ist gegen die vita-headers syntaxgeprüft, Blockliste/DNS/Plugins sind per Host-Tests geprüft. Der Player-Teil (`player.c`) muss auf der Konsole verifiziert werden.
+- **Netzwerk:** MP4 (Range-Anfragen) und HLS (Playlist, Segmente, AES-Schlüssel) laufen komplett über den eigenen Netzwerkstack – AdBlock, DNS und Header wie Referer gelten überall.
+- Der Player ist am Host mit Software-Ersatz für Decoder und Tonausgabe getestet; auf der Vita bitte mit SELECT die Decoder-Infos prüfen.
 
 ## Projektstruktur
 
@@ -144,7 +143,11 @@ src/net.c       HTTP (curl), eigene Weiterleitungen, Range-Streams für den Play
 src/dns.c       eigener DNS-Resolver (UDP, Cache, erkennt AdGuard-Sperrantworten)
 src/adblock.c   Blockliste mit Subdomain-Abgleich und Ausnahmen
 src/plugins.c   Lua-Laufzeit, Sandbox, vs.*-API, Worker-Thread
-src/player.c    sceAvPlayer, YUV-Textur, Audio-Thread
+src/player.c    Anzeige der Videobilder (RGBA/YUV-Texturen)
+src/media.c     Demux (FFmpeg), Decoder-Wahl, A/V-Sync, Sprünge
+src/hls.c       HLS-Client inkl. AES-128
+src/vdec_*.c    Hardware- (sceAvcdec) und Software-H.264
+src/thumbs*.c   Vorschaubilder
 third_party/lua Lua 5.4.6 (MIT-Lizenz, Lua.org, PUC-Rio)
 data/           Standardkonfiguration und Plugins
 tests/          Host-Tests
