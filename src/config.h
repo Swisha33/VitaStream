@@ -12,6 +12,7 @@ typedef struct {
     char dns_secondary[64];   /* z. B. 94.140.15.15 */
     char user_agent[160];
     int  timeout_sec;
+    int  ssl_verify;          /* HTTPS-Zertifikate prüfen */
 } VsConfig;
 
 extern VsConfig g_cfg;

@@ -39,11 +39,11 @@ ux0:data/VitaStream/
 ├── blocklist.txt     Blockliste – beliebige hosts-/AdGuard-Listen anhängen
 ├── playlists.txt     M3U-Playlists:  Name|URL   oder   Name|file:datei.m3u
 ├── sites.txt         eigene Websites (siehe unten)
-├── cacert.pem        optional, empfohlen: CA-Zertifikate für TLS-Prüfung
+├── cacert.pem        optional: eigene CA-Zertifikate statt der Systemliste
 └── plugins/          Lua-Plugins (*.lua)
 ```
 
-**TLS-Zertifikate:** Lege eine aktuelle `cacert.pem` (z. B. von https://curl.se/docs/caextract.html) nach `ux0:data/VitaStream/`. Ohne die Datei werden HTTPS-Zertifikate nicht geprüft.
+**TLS-Zertifikate:** HTTPS wird standardmäßig mit den Systemzertifikaten der Vita geprüft. Sind die für eine Seite zu alt, lege eine aktuelle `cacert.pem` (z. B. von https://curl.se/docs/caextract.html) nach `ux0:data/VitaStream/`. Nur zur Fehlersuche: `ssl_verify=0` in `config.ini`.
 
 **Größere Blocklisten:** z. B. die StevenBlack-hosts-Datei oder die AdGuard-DNS-Filterliste herunterladen und an `blocklist.txt` anhängen, danach in den Einstellungen „Blockliste neu laden“.
 

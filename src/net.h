@@ -8,6 +8,7 @@
 #define NET_ERR      -1
 #define NET_BLOCKED  -2   /* durch Blockliste oder DNS-Filter gesperrt */
 #define NET_DNS_FAIL -3
+#define NET_TLS      -4   /* Zertifikatsprüfung fehlgeschlagen */
 
 typedef struct {
     char  *data;

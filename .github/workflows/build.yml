@@ -22,6 +22,8 @@ jobs:
     container: vitasdk/vitasdk:latest
     steps:
       - uses: actions/checkout@v4
+      - name: Passendes OpenSSL fuer das curl-Paket
+        run: vdpm openssl
       - name: Bauen
         shell: bash
         run: |

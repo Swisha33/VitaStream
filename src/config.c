@@ -17,6 +17,7 @@ static void set_defaults(void)
     strcpy(g_cfg.user_agent,
            "Mozilla/5.0 (PlayStation Vita 3.74) AppleWebKit/537.73 (KHTML, like Gecko) VitaStream/0.1");
     g_cfg.timeout_sec = 20;
+    g_cfg.ssl_verify  = 1;
 }
 
 static int file_exists(const char *p)
@@ -87,6 +88,7 @@ int config_load(void)
         else if (!strcmp(k, "dns_primary"))   snprintf(g_cfg.dns_primary, sizeof g_cfg.dns_primary, "%s", v);
         else if (!strcmp(k, "dns_secondary")) snprintf(g_cfg.dns_secondary, sizeof g_cfg.dns_secondary, "%s", v);
         else if (!strcmp(k, "user_agent"))    snprintf(g_cfg.user_agent, sizeof g_cfg.user_agent, "%s", v);
+        else if (!strcmp(k, "ssl_verify"))    g_cfg.ssl_verify = atoi(v) != 0;
         else if (!strcmp(k, "timeout"))       g_cfg.timeout_sec = atoi(v) > 0 ? atoi(v) : 20;
     }
     fclose(f);
@@ -106,10 +108,12 @@ int config_save(void)
         "dns_primary=%s\n"
         "dns_secondary=%s\n"
         "timeout=%d\n"
+        "# ssl_verify: HTTPS-Zertifikate pruefen (0 nur zur Fehlersuche)\n"
+        "ssl_verify=%d\n"
         "user_agent=%s\n",
         g_cfg.adblock_enabled, g_cfg.custom_dns_enabled,
         g_cfg.dns_primary, g_cfg.dns_secondary,
-        g_cfg.timeout_sec, g_cfg.user_agent);
+        g_cfg.timeout_sec, g_cfg.ssl_verify, g_cfg.user_agent);
     fclose(f);
     return 0;
 }

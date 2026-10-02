@@ -75,6 +75,7 @@ const char *net_strerror(int code)
     case NET_OK:       return "OK";
     case NET_BLOCKED:  return "Durch AdBlock gesperrt";
     case NET_DNS_FAIL: return "DNS-Aufloesung fehlgeschlagen";
+    case NET_TLS:      return "TLS-Zertifikat ungueltig (cacert.pem ablegen oder ssl_verify=0)";
     default:           return "Netzwerkfehler";
     }
 }
@@ -172,10 +173,10 @@ static void common_opts(CURL *c, const char *url)
     curl_easy_setopt(c, CURLOPT_TIMEOUT, (long)g_cfg.timeout_sec);
     curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, "");
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
-    if (s_have_ca) {
-        curl_easy_setopt(c, CURLOPT_CAINFO, CA_FILE);
-    } else {
-        /* Ohne CA-Bundle kann TLS nicht geprüft werden – siehe README (cacert.pem) */
+    /* Standard: Zertifikatsliste der Vita (vs0:data/external/cert/CA_LIST.cer, im
+       curl-Paket voreingestellt). Eine eigene cacert.pem hat Vorrang. */
+    if (s_have_ca) curl_easy_setopt(c, CURLOPT_CAINFO, CA_FILE);
+    if (!g_cfg.ssl_verify) {
         curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
     }
@@ -225,6 +226,7 @@ int net_request(const char *url_in, const char *post_body, const char *headers,
         curl_slist_free_all(hl);
         curl_easy_cleanup(c);
 
+        if (cr == CURLE_PEER_FAILED_VERIFICATION || cr == CURLE_SSL_CACERT_BADFILE) { result = NET_TLS; break; }
         if (cr != CURLE_OK) { result = NET_ERR; break; }
         if (status) *status = code;
         if (next) {
