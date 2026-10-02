@@ -107,7 +107,7 @@ Plugins laufen in einer Sandbox ohne `io`, `os`, `dofile`, `loadfile`. Alle Netz
 
 ## Bauen
 
-Mit installiertem [VitaSDK](https://vitasdk.org) (Pakete: `lua curl openssl zlib libvita2d libpng libjpeg-turbo`):
+Mit installiertem [VitaSDK](https://vitasdk.org) (Pakete: `curl openssl zlib libvita2d libpng libjpeg-turbo`):
 
 ```sh
 cmake -S . -B build && cmake --build build
@@ -141,6 +141,7 @@ src/dns.c       eigener DNS-Resolver (UDP, Cache, erkennt AdGuard-Sperrantworten
 src/adblock.c   Blockliste mit Subdomain-Abgleich und Ausnahmen
 src/plugins.c   Lua-Laufzeit, Sandbox, vs.*-API, Worker-Thread
 src/player.c    sceAvPlayer, YUV-Textur, Audio-Thread
+third_party/lua Lua 5.4.6 (MIT-Lizenz, Lua.org, PUC-Rio)
 data/           Standardkonfiguration und Plugins
 tests/          Host-Tests
 ```

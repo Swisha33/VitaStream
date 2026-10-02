@@ -19,6 +19,12 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall -Wno-unused-function")
 set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12") # erweitertes RAM
 
+# Lua 5.4 wird mitgebaut (third_party/lua, MIT-Lizenz) - unabhängig von SDK-Paketen
+file(GLOB LUA_SOURCES third_party/lua/*.c)
+add_library(lua_vendored STATIC ${LUA_SOURCES})
+target_include_directories(lua_vendored PUBLIC third_party/lua)
+target_compile_options(lua_vendored PRIVATE -O2 -w)
+
 add_executable(${PROJECT_NAME}
   src/main.c
   src/ui.c
@@ -31,7 +37,7 @@ add_executable(${PROJECT_NAME}
 )
 
 target_link_libraries(${PROJECT_NAME}
-  lua
+  lua_vendored
   curl ssl crypto
   vita2d
   png jpeg z

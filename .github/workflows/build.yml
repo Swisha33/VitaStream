@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Fehlende Pakete nachinstallieren
-        run: vdpm lua curl openssl zlib libvita2d libpng libjpeg-turbo || true
+        run: vdpm curl openssl zlib libvita2d libpng libjpeg-turbo || true
       - name: Bauen
         shell: bash
         run: |

@@ -113,7 +113,7 @@ static int url_port(const char *url)
 static void note_blocked(const char *host)
 {
     g_net_stats.blocked++;
-    snprintf(g_net_stats.last_blocked, sizeof g_net_stats.last_blocked, "%s", host);
+    snprintf(g_net_stats.last_blocked, sizeof g_net_stats.last_blocked, "%.120s", host);
 }
 
 /* Prüft Blockliste und löst bei Bedarf über eigenen DNS auf.
