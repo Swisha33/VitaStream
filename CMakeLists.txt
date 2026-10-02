@@ -38,7 +38,7 @@ add_executable(${PROJECT_NAME}
 
 target_link_libraries(${PROJECT_NAME}
   lua_vendored
-  curl ssl crypto
+  curl ssl crypto zstd
   vita2d
   png jpeg z
   SceAvPlayer_stub

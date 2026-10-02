@@ -22,8 +22,6 @@ jobs:
     container: vitasdk/vitasdk:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Fehlende Pakete nachinstallieren
-        run: vdpm curl openssl zlib libvita2d libpng libjpeg-turbo || true
       - name: Bauen
         shell: bash
         run: |
