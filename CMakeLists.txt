@@ -36,9 +36,16 @@ add_executable(${PROJECT_NAME}
   src/player.c
 )
 
+option(USE_MBEDTLS "curl mit mbedTLS statt OpenSSL linken" OFF)
+if(USE_MBEDTLS)
+  set(TLS_LIBS mbedtls mbedx509 mbedcrypto)
+else()
+  set(TLS_LIBS ssl crypto)
+endif()
+
 target_link_libraries(${PROJECT_NAME}
   lua_vendored
-  curl ssl crypto zstd
+  curl ${TLS_LIBS} zstd
   vita2d
   png jpeg z
   SceAvPlayer_stub

@@ -22,20 +22,8 @@ jobs:
     container: vitasdk/vitasdk:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Passendes OpenSSL fuer das curl-Paket
-        run: vdpm openssl
       - name: Bauen
-        shell: bash
-        run: |
-          set -o pipefail
-          ( cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j1 ) 2>&1 | tee build.log
-      - name: Fehler als Annotationen ausgeben
-        if: failure()
-        shell: bash
-        run: |
-          grep -E "error|Error|undefined reference|not found|No such|cannot find" build.log | head -40 | \
-            sed 's/%/%25/g' | while IFS= read -r l; do echo "::error::$l"; done
-          tail -15 build.log | sed 's/%/%25/g' | while IFS= read -r l; do echo "::warning::$l"; done
+        run: ci/vita-build.sh
       - uses: actions/upload-artifact@v4
         with:
           name: VitaStream-vpk
