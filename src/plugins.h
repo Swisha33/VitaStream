@@ -65,6 +65,8 @@ void    plugins_list_append(PluginList *dst, PluginList *src, int remove_index);
 typedef enum { JOB_IDLE, JOB_RUNNING, JOB_DONE, JOB_ERROR } JobState;
 
 int      plugins_start_search(int src, const char *query);
+/* wie oben, mit Kontext (id des Such-Eintrags) als 2. Argument: search(text, kontext) */
+int      plugins_start_search_ctx(int src, const char *query, const char *ctx);
 int      plugins_start_browse(int src, const char *id);       /* id darf NULL sein */
 int      plugins_start_resolve(int src, const PluginItem *it);
 

@@ -13,7 +13,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "VitaStream")
 set(VITA_TITLEID  "VSTR00001")
-set(VITA_VERSION  "00.50")
+set(VITA_VERSION  "00.60")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall -Wno-unused-function")
@@ -106,6 +106,7 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE data/plugins/direct.lua data/plugins/direct.lua
   FILE data/plugins/m3u.lua data/plugins/m3u.lua
   FILE data/plugins/mediathek.lua data/plugins/mediathek.lua
+  FILE data/plugins/jellyfin.lua data/plugins/jellyfin.lua
   FILE data/plugins/website.lua data/plugins/website.lua
   FILE data/config.ini data/config.ini
   FILE data/cacert.pem data/cacert.pem

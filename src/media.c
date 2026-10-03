@@ -219,6 +219,7 @@ static struct {
     int64_t         origin;           /* µs, Zeitstempel des Anfangs */
     int64_t         duration;         /* µs */
     int64_t         last_pos;         /* µs */
+    int64_t         pos_base, pos_anchor, pos_prev;   /* Anzeigeposition, robust gegen Zeitsprünge */
     int             live;
     char            info[160];
     int             frames_shown, frames_dropped, vdec_errors, vpackets;
@@ -279,6 +280,31 @@ static void clock_invalidate(void)
     pthread_mutex_lock(&M.cm);
     M.clock_valid = 0;
     pthread_mutex_unlock(&M.cm);
+}
+
+/* Anzeigeposition aus Zeitstempeln: nach einem Sprung (Seek, Werbeblock, neu beginnende
+   Zeitstempel nach dem Neuöffnen eines HLS-Streams) läuft sie an der bisherigen Stelle weiter.
+   Aufruf mit M.fm gesperrt. */
+static void pos_update(int64_t pts)
+{
+    if (M.pos_anchor == INT64_MIN) {
+        M.pos_anchor = pts;
+    } else if (pts - M.pos_prev > 5000000 || M.pos_prev - pts > 5000000) {
+        M.pos_base += M.pos_prev - M.pos_anchor;
+        M.pos_anchor = pts;
+    }
+    M.pos_prev = pts;
+    M.last_pos = M.pos_base + (pts - M.pos_anchor);
+}
+
+static void pos_reset(int64_t base, int64_t anchor)
+{
+    pthread_mutex_lock(&M.fm);
+    M.pos_base = base;
+    M.pos_anchor = anchor;
+    M.pos_prev = anchor;
+    M.last_pos = base;
+    pthread_mutex_unlock(&M.fm);
 }
 
 static int audio_is_master(void) { return M.ai >= 0 && !M.audio_failed; }
@@ -498,7 +524,7 @@ int media_current_frame(int *w, int *h, int *yuv)
         if (M.shown >= 0 && M.shown != best) M.slot[M.shown].st = FS_RETIRED;
         M.slot[best].st = FS_SHOWN;
         M.shown = best;
-        M.last_pos = M.slot[best].pts - M.origin;
+        pos_update(M.slot[best].pts);
         M.frames_shown++;
         pthread_cond_broadcast(&M.fcv);
     }
@@ -812,6 +838,7 @@ static int open_source(char *err, int errlen)
     M.live = M.hls ? hls_is_live(M.hls) : 0;
     M.duration = M.hls ? hls_duration_us(M.hls) : (M.fmt->duration > 0 ? M.fmt->duration : 0);
     M.origin = M.fmt->start_time != AV_NOPTS_VALUE ? M.fmt->start_time : 0;
+    pos_reset(0, M.origin);
 
     char vinfo[64] = "kein Video", ainfo[48] = "kein Ton";
     if (M.vi >= 0) {
@@ -911,7 +938,7 @@ static void do_seek(void)
     } else {
         av_seek_frame(M.fmt, -1, M.origin + target, AVSEEK_FLAG_BACKWARD);
     }
-    M.last_pos = target;
+    pos_reset(target, INT64_MIN);
 }
 
 static void *demux_thread(void *arg)
@@ -1119,7 +1146,7 @@ int64_t media_position_ms(void)
     if (M.seek_req) return M.seek_target / 1000;
     if (M.vi < 0) {
         int64_t c = clock_get();
-        if (c != INT64_MIN) M.last_pos = c - M.origin;
+        if (c != INT64_MIN) { pthread_mutex_lock(&M.fm); pos_update(c); pthread_mutex_unlock(&M.fm); }
     }
     return M.last_pos > 0 ? M.last_pos / 1000 : 0;
 }

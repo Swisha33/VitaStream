@@ -440,6 +440,10 @@ static void run_job(void)
     } else if (W.op == OP_RESOLVE) lua_rawgeti(L, LUA_REGISTRYINDEX, W.item_ref);
     else if (W.arg)          lua_pushstring(L, W.arg);
     else                     lua_pushnil(L);
+    if (W.op == OP_SEARCH && W.arg2) {   /* search(text, kontext) - Kontext = id des Such-Eintrags */
+        lua_pushstring(L, W.arg2);
+        nargs = 2;
+    }
 
     if (lua_pcall(L, nargs, 2, 0) != LUA_OK) {
         set_error(lua_tostring(L, -1));
@@ -582,6 +586,10 @@ int plugins_item_actions(int src, const PluginItem *it, PluginAction *out, int m
 }
 
 int plugins_start_search(int src, const char *q)  { return start(OP_SEARCH, src, q, LUA_NOREF); }
+int plugins_start_search_ctx(int src, const char *q, const char *ctx)
+{
+    return start2(OP_SEARCH, src, q, (ctx && ctx[0]) ? ctx : NULL, LUA_NOREF);
+}
 int plugins_start_browse(int src, const char *id) { return start(OP_BROWSE, src, id, LUA_NOREF); }
 int plugins_start_resolve(int src, const PluginItem *it) { return start(OP_RESOLVE, src, NULL, it->ref); }
 

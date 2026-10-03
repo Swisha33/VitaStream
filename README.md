@@ -12,6 +12,7 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
   - *Mediatheken* – ARD, ZDF, arte, 3sat, KiKA … pro Sender: Neueste, Sendungen, Kategorien (Filme, Dokus, Krimis …), ohne 80er-Grenze
   - *Sender-Finder* – tausende frei empfangbare Sender (iptv-org) nach Kategorie, Land, Sprache; Pluto TV, Samsung TV Plus, Rakuten TV; Anime & Zeichentrick
   - *South Park* – alle Staffeln von southpark.de (Deutsch/Englisch)
+  - *Jellyfin* – eigener Jellyfin-Server: Mediathek 1:1 abgebildet (Ansichten → Serien → Staffeln → Folgen), Server transkodiert bei Bedarf nach H.264/720p
   - *M3U-Playlists & Favoriten* – eigene Listen, Logos, Gruppen
   - *Direkte URL & Website-Scanner* – Link abspielen oder eine Website nach Videos/Streams durchsuchen
   - *Eigene Websites* – per Muster in `sites.txt`
@@ -29,7 +30,7 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
 | Zurück | eine Ebene zurück | Wiedergabe beenden |
 | △ | Suche (in der Quelle) / Einstellungen (Startseite) | – |
 | □ | Menü: gesehen/ungesehen, Favoriten, Playlists, Bearbeiten | – |
-| ▲ / ▼ (Steuerkreuz) | Auswahl | vorheriger / nächster Eintrag (Senderwechsel, nächste Folge) |
+| ▲ / ▼ (Steuerkreuz) | Auswahl | zweimal drücken: vorheriger / nächster Eintrag (Senderwechsel, nächste Folge) |
 | SELECT | – | technische Infos (Decoder, Puffer) |
 | L / R | seitenweise blättern | ±60 s |
 | ◀ / ▶ | DNS-Preset wechseln (Einstellungen) | ±10 s |

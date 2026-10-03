@@ -4,7 +4,7 @@
 #define VS_DATA_DIR    "ux0:data/VitaStream"
 #define VS_APP_DATA    "app0:data"
 #define VS_CONFIG_FILE VS_DATA_DIR "/config.ini"
-#define VS_APP_VERSION "0.5"
+#define VS_APP_VERSION "0.6"
 
 typedef struct {
     int  adblock_enabled;     /* lokale Blockliste aktiv */

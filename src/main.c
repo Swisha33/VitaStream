@@ -58,6 +58,7 @@ static char    play_key[2304];          /* Schlüssel für "Gesehen" */
 static char    play_title[256];
 static int     play_marked;
 static char   *pending_arg;
+static int     zap_target = -1, zap_dir, zap_timer;   /* Senderwechsel: wartet auf 2. Druck */
 
 /* Speichern in eine Playlist: Einträge nacheinander auflösen */
 static struct {
@@ -238,6 +239,8 @@ static void start_play(int index)
     snprintf(play_key, sizeof play_key, "%s", k ? k : "");
     snprintf(play_title, sizeof play_title, "%s", it->title);
     play_marked = 0;
+    zap_target = -1;
+    zap_timer = 0;
     start_job_screen(PEND_PLAY, it->title);
 }
 
@@ -824,15 +827,23 @@ int main(void)
                 }
             }
 
-            /* Hoch/Runter: vorheriger/nächster Eintrag der Liste (Senderwechsel, nächste Folge) */
+            /* Hoch/Runter: vorheriger/nächster Eintrag der Liste (Senderwechsel, nächste Folge).
+               Erst zweimal dieselbe Richtung wechselt - ein versehentlicher Druck zeigt nur das Ziel an. */
+            if (zap_timer > 0 && --zap_timer == 0) zap_target = -1;
             if ((in.pressed & (SCE_CTRL_UP | SCE_CTRL_DOWN)) && depth > 0) {
-                int next = neighbour_video(play_index, (in.pressed & SCE_CTRL_UP) ? -1 : 1);
-                if (next >= 0) {
+                int dir = (in.pressed & SCE_CTRL_UP) ? -1 : 1;
+                if (zap_target >= 0 && zap_dir == dir) {
+                    int next = zap_target;
+                    zap_target = -1;
+                    zap_timer = 0;
                     player_close();
                     scr = SCR_LIST;
                     start_play(next);
                     break;
                 }
+                zap_dir = dir;
+                zap_target = neighbour_video(play_index, dir);
+                zap_timer = 120;   /* ca. 2 s */
             }
 
             int quit = (in.pressed & BTN_CANCEL) != 0;
@@ -867,7 +878,7 @@ int main(void)
 
                 ui_rect(0, 0, SCREEN_W, 40, 0xB0000000);
                 ui_text_clipped(20, 28, SCREEN_W - 260, COL_TEXT, play_title);
-                if (depth > 0) ui_text_scaled(SCREEN_W - 230, 28, COL_DIM, 0.8f, "Hoch/Runter: vorh./naechster");
+                if (depth > 0) ui_text_scaled(SCREEN_W - 230, 28, COL_DIM, 0.8f, "2x Hoch/Runter: wechseln");
                 ui_rect(0, SCREEN_H - 70, SCREEN_W, 70, 0xB0000000);
                 if (dur) {
                     int w = (int)((SCREEN_W - 40) * (double)pos / (double)dur);
@@ -878,6 +889,17 @@ int main(void)
                 ui_text_scaled(SCREEN_W - 650, SCREEN_H - 22, COL_DIM, 0.8f,
                     player_paused() ? "PAUSE   Links/Rechts: 10 s   L/R: 60 s   SELECT: Infos"
                                     : "Bestaetigen: Pause   Links/Rechts: 10 s   L/R: 60 s   SELECT: Infos");
+            }
+            if (zap_timer > 0) {
+                char zl[300];
+                if (zap_target >= 0)
+                    snprintf(zl, sizeof zl, "%s: %s   -   nochmal %s druecken zum Wechseln",
+                             zap_dir < 0 ? "Vorheriger" : "Naechster",
+                             stack[depth - 1].list.items[zap_target].title, zap_dir < 0 ? "Hoch" : "Runter");
+                else
+                    snprintf(zl, sizeof zl, "Kein %s Eintrag in der Liste", zap_dir < 0 ? "vorheriger" : "weiterer");
+                ui_rect(0, SCREEN_H / 2 - 30, SCREEN_W, 50, 0xC0000000);
+                ui_text_clipped(30, SCREEN_H / 2 + 3, SCREEN_W - 60, COL_TEXT, zl);
             }
             ui_end();
             break;

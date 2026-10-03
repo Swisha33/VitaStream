@@ -51,12 +51,55 @@ static int mediathek_reply(const char *post, NetBuf *out)
     return NET_OK;
 }
 
+/* --- simulierter Jellyfin-Server --- */
+static int jelly_reply(const char *url, const char *post, NetBuf *out, long *status) {
+    if (strstr(url, "/Users/AuthenticateByName")) {
+        snprintf(last_post, sizeof last_post, "%s", post ? post : "");
+        if (!post || !strstr(post, "\"Pw\":\"geheim\"")) { if (status) *status = 401; return reply(out, "{}"); }
+        return reply(out, "{\"AccessToken\":\"TOK123\",\"User\":{\"Id\":\"u1\"}}");
+    }
+    if (strstr(url, "/System/Info")) return reply(out, "{\"Version\":\"10.9\"}");
+    if (strstr(url, "/Users/u1/Views"))
+        return reply(out, "{\"Items\":[{\"Id\":\"libmov\",\"Name\":\"Filme\",\"Type\":\"CollectionFolder\",\"CollectionType\":\"movies\"},"
+                          "{\"Id\":\"libtv\",\"Name\":\"Serien\",\"Type\":\"CollectionFolder\",\"CollectionType\":\"tvshows\"}]}");
+    /* Einzel-Item-Info (Typ-Erkennung) */
+    if (strstr(url, "/Users/u1/Items/ser1")) return reply(out, "{\"Id\":\"ser1\",\"Name\":\"Testserie\",\"Type\":\"Series\"}");
+    if (strstr(url, "/Users/u1/Items/sea1")) return reply(out, "{\"Id\":\"sea1\",\"Name\":\"Staffel 1\",\"Type\":\"Season\",\"SeriesId\":\"ser1\"}");
+    if (strstr(url, "/Users/u1/Items/ep1"))  return reply(out, "{\"Id\":\"ep1\",\"Name\":\"Pilot\",\"Type\":\"Episode\"}");
+    if (strstr(url, "/Users/u1/Items/mov1")) return reply(out, "{\"Id\":\"mov1\",\"Name\":\"Film H264\",\"Type\":\"Movie\"}");
+    if (strstr(url, "/Users/u1/Items/mov2")) return reply(out, "{\"Id\":\"mov2\",\"Name\":\"Film HEVC\",\"Type\":\"Movie\"}");
+    /* Staffeln / Folgen */
+    if (strstr(url, "/Shows/ser1/Seasons"))
+        return reply(out, "{\"Items\":[{\"Id\":\"sea1\",\"Name\":\"Staffel 1\",\"Type\":\"Season\",\"ChildCount\":2}]}");
+    if (strstr(url, "/Shows/ser1/Episodes"))
+        return reply(out, "{\"Items\":[{\"Id\":\"ep1\",\"Name\":\"Pilot\",\"Type\":\"Episode\",\"IndexNumber\":1,\"ParentIndexNumber\":1,\"RunTimeTicks\":12000000000},"
+                          "{\"Id\":\"ep2\",\"Name\":\"Zweite\",\"Type\":\"Episode\",\"IndexNumber\":2,\"ParentIndexNumber\":1}]}");
+    /* Items unter einer Bibliothek */
+    if (strstr(url, "ParentId=libtv"))
+        return reply(out, "{\"Items\":[{\"Id\":\"ser1\",\"Name\":\"Testserie\",\"Type\":\"Series\",\"ProductionYear\":2020,\"ChildCount\":1,\"ImageTags\":{\"Primary\":\"abc\"}}],\"TotalRecordCount\":1}");
+    if (strstr(url, "ParentId=libmov"))
+        return reply(out, "{\"Items\":[{\"Id\":\"mov1\",\"Name\":\"Film H264\",\"Type\":\"Movie\",\"ProductionYear\":2021},"
+                          "{\"Id\":\"mov2\",\"Name\":\"Film HEVC\",\"Type\":\"Movie\",\"ProductionYear\":2022}],\"TotalRecordCount\":2}");
+    /* PlaybackInfo */
+    if (strstr(url, "/Items/mov1/PlaybackInfo"))
+        return reply(out, "{\"MediaSources\":[{\"Id\":\"mov1\",\"Container\":\"mp4\",\"MediaStreams\":[{\"Type\":\"Video\",\"Codec\":\"h264\",\"Height\":720}]}]}");
+    if (strstr(url, "/Items/mov2/PlaybackInfo"))
+        return reply(out, "{\"MediaSources\":[{\"Id\":\"src2\",\"Container\":\"mkv\",\"MediaStreams\":[{\"Type\":\"Video\",\"Codec\":\"hevc\",\"Height\":1080}]}]}");
+    if (strstr(url, "/Items/ep1/PlaybackInfo"))
+        return reply(out, "{\"MediaSources\":[{\"Id\":\"ep1\",\"Container\":\"mp4\",\"MediaStreams\":[{\"Type\":\"Video\",\"Codec\":\"h264\",\"Height\":1080}]}]}");
+    if (strstr(url, "/Users/u1/Items?searchTerm="))
+        return reply(out, "{\"Items\":[{\"Id\":\"mov2\",\"Name\":\"Film HEVC\",\"Type\":\"Movie\",\"ProductionYear\":2022}]}");
+    if (status) *status = 404;
+    return reply(out, "{}");
+}
+
 int net_request(const char *url, const char *post, const char *hdr, NetBuf *out, long *status, char *final_url, int fl) {
     memset(out, 0, sizeof *out);
     if (status) *status = 200;
     if (final_url) snprintf(final_url, fl, "%s", url);
     snprintf(last_headers, sizeof last_headers, "%s", hdr ? hdr : "");
     if (net_check_url(url) == NET_BLOCKED) return NET_BLOCKED;
+    if (strstr(url, "jelly.example")) return jelly_reply(url, post, out, status);
     if (strstr(url, "mediathekviewweb")) {
         snprintf(last_post, sizeof last_post, "%s", post ? post : "");
         return mediathek_reply(post ? post : "", out);
@@ -144,6 +187,13 @@ static int browse(int src, const char *id, PluginList *l) {
     plugins_start_browse(src, id);
     int st = wait_job();
     if (st != JOB_DONE) { printf("  browse(%s): %s\n", id ? id : "nil", plugins_job_error()); plugins_job_reset(); memset(l, 0, sizeof *l); return -1; }
+    plugins_take_list(l);
+    return 0;
+}
+static int search_ctx(int src, const char *q, const char *ctx, PluginList *l) {
+    plugins_start_search_ctx(src, q, ctx);
+    int st = wait_job();
+    if (st != JOB_DONE) { printf("  search(%s): %s\n", q, plugins_job_error()); plugins_job_reset(); memset(l, 0, sizeof *l); return -1; }
     plugins_take_list(l);
     return 0;
 }
@@ -358,6 +408,47 @@ int main(void) {
         CHECK(browse(sp, l.items[2].id, &l2) == 0 && l2.count == 1 && !strcmp(l2.items[0].title, "Weight Gain"));
         plugins_list_free(&l2);
     }
+    plugins_list_free(&l);
+
+    /* ---------- Jellyfin ---------- */
+    int jf = find_src("Jellyfin"); CHECK(jf >= 0);
+    /* ohne Zugangsdaten: Einrichtungshinweis */
+    CHECK(browse(jf, NULL, &l) == 0 && l.count == 4 && find_item(&l, "Noch nicht eingerichtet") == 0 && l.items[3].kind == ITEM_SEARCH);
+    plugins_list_free(&l);
+    /* falsche Zugangsdaten */
+    CHECK(search_ctx(jf, "http://jelly.example | max | falsch", "login", &l) < 0);
+    /* Anmeldung ueber Suchkontext */
+    CHECK(search_ctx(jf, "http://jelly.example | max | geheim", "login", &l) == 0);
+    CHECK(strstr(last_post, "\"Username\":\"max\"") && strstr(last_post, "\"Pw\":\"geheim\""));
+    CHECK(find_item(&l, "Filme") >= 0 && find_item(&l, "Serien") >= 0 && find_item(&l, "Suchen") >= 0);
+    char lib_tv[64] = "", lib_mov[64] = "";
+    for (int i = 0; i < l.count; i++) {
+        if (!strcmp(l.items[i].title, "Serien")) snprintf(lib_tv, sizeof lib_tv, "%s", l.items[i].id);
+        if (!strcmp(l.items[i].title, "Filme"))  snprintf(lib_mov, sizeof lib_mov, "%s", l.items[i].id);
+    }
+    plugins_list_free(&l);
+    /* Serien-Bibliothek -> Serie -> Staffeln -> Folgen (in Reihenfolge) */
+    CHECK(browse(jf, lib_tv, &l) == 0 && l.count == 1 && l.items[0].kind == ITEM_FOLDER);
+    CHECK(l.items[0].thumb && strstr(l.items[0].thumb, "/Items/ser1/Images/Primary") && strstr(l.items[0].thumb, "api_key=TOK123"));
+    char ser[64]; snprintf(ser, sizeof ser, "%s", l.items[0].id);
+    plugins_list_free(&l);
+    CHECK(browse(jf, ser, &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Staffel 1"));
+    char sea[64]; snprintf(sea, sizeof sea, "%s", l.items[0].id);
+    plugins_list_free(&l);
+    CHECK(browse(jf, sea, &l) == 0 && l.count == 2 && !strcmp(l.items[0].title, "1. Pilot") && !strcmp(l.items[1].title, "2. Zweite"));
+    CHECK(l.items[0].kind == ITEM_VIDEO);
+    /* Folge (1080p h264) -> Transkodierung erzwungen */
+    CHECK(resolve(jf, &l.items[0], &si) == 0 && strstr(si.url, "/Videos/ep1/master.m3u8") && strstr(si.url, "VideoCodec=h264") && strstr(si.url, "MaxHeight=720"));
+    plugins_list_free(&l);
+    /* Filme: direktes Abspielen (h264/720p) vs. Transkodierung (hevc/1080p) */
+    CHECK(browse(jf, lib_mov, &l) == 0 && l.count == 2);
+    int im1 = find_item(&l, "Film H264"), im2 = find_item(&l, "Film HEVC");
+    CHECK(im1 >= 0 && im2 >= 0);
+    CHECK(resolve(jf, &l.items[im1], &si) == 0 && strstr(si.url, "/Videos/mov1/stream") && strstr(si.url, "static=true"));
+    CHECK(resolve(jf, &l.items[im2], &si) == 0 && strstr(si.url, "master.m3u8") && strstr(si.url, "MediaSourceId=src2"));
+    plugins_list_free(&l);
+    /* Suche auf dem Server */
+    CHECK(search(jf, "hevc", &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Film HEVC"));
     plugins_list_free(&l);
 
     CHECK(plugins_reload() == n);
