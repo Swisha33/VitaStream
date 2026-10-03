@@ -14,3 +14,4 @@ ci.log
 tests/test_media
 tests/bl_media.txt
 tests/test_watched
+tests/test_sub
