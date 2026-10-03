@@ -79,6 +79,31 @@ local function find_media(html, base, out, seen)
   end
 end
 
+-- Seiten, die ihr Video offen ankuendigen: og:video, twitter:player:stream, JSON-LD contentUrl/embedUrl
+local function announced_media(html, base)
+  local direct, players = {}, {}
+  local function add(list, u)
+    if u and #u > 0 then
+      local a = absolute(base, u)
+      if a:match("^https?://") then list[#list + 1] = a end
+    end
+  end
+  for tag in html:gmatch("<meta[^>]+>") do
+    local prop = tag:match('property="([^"]+)"') or tag:match('name="([^"]+)"') or ""
+    local content = tag:match('content="([^"]+)"')
+    prop = prop:lower()
+    if prop == "og:video" or prop == "og:video:url" or prop == "og:video:secure_url" or prop == "twitter:player:stream" then
+      add(direct, content)
+    elseif prop == "twitter:player" then
+      add(players, content)
+    end
+  end
+  local text = html:gsub("\\/", "/")
+  for u in text:gmatch('"contentUrl"%s*:%s*"([^"]+)"') do add(direct, u) end
+  for u in text:gmatch('"embedUrl"%s*:%s*"([^"]+)"') do add(players, u) end
+  return direct, players
+end
+
 local KEYWORDS = { "video", "watch", "folge", "episode", "stream", "live", "film", "play", "media",
                    "sendung", "tv", "clip", "serie", "mediathek", "kanal", "channel" }
 
@@ -147,20 +172,25 @@ local function scan(start)
   local function add_from(page_html, page_url, depth)
     local media = {}
     find_media(page_html, page_url, media, seen_media)
+    local announced, players = announced_media(page_html, page_url)
+    for _, u in ipairs(announced) do
+      if not seen_media[u] then seen_media[u] = true; media[#media + 1] = u end
+    end
     local title = page_title(page_html) or page_url
     local image = page_image(page_html, page_url)
     for i, m in ipairs(media) do
       results[#results + 1] = {
         title = (#media > 1) and (title .. " (" .. i .. ")") or title,
-        subtitle = media_type(m) .. "  |  " .. host_of(m),
+        subtitle = (media_type(m) or "Video") .. "  |  " .. host_of(m),
         id = m, url = m, kind = "video",
         headers = { Referer = page_url },
         thumb = image or ("og:" .. page_url),
       }
     end
-    -- eingebettete Player
+    -- eingebettete Player (iframes und angekuendigte Player-Seiten)
     if depth == 0 then
       local frames = find_frames(page_html, page_url)
+      for _, p in ipairs(players) do frames[#frames + 1] = p end
       for i = 1, math.min(#frames, MAX_FRAMES) do
         if not vs.is_blocked(frames[i]) then
           local fh, fu = fetch_page(frames[i], page_url)

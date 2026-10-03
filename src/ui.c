@@ -213,7 +213,8 @@ void ui_list_thumbs(int count, int cursor, int *scroll, ListThumbFn fn, void *ct
             ui_rect(10, y, 4, TROW_H - 4, COL_ACCENT);
         }
         const char *t = "", *sub = NULL, *thumb = NULL;
-        fn(ctx, i, &t, &sub, &thumb);
+        int flags = 0;
+        fn(ctx, i, &t, &sub, &thumb, &flags);
 
         int bx = 22, by = y + (TROW_H - 4 - THUMB_H) / 2;
         vita2d_texture *tex = thumb ? thumbs_get(thumb) : NULL;
@@ -224,10 +225,18 @@ void ui_list_thumbs(int count, int cursor, int *scroll, ListThumbFn fn, void *ct
         } else {
             draw_placeholder(bx, by, THUMB_W, THUMB_H, t);
         }
+        if (flags & LIST_FLAG_WATCHED) {
+            /* grünes Band "Gesehen" über dem Vorschaubild */
+            ui_rect(bx, by + THUMB_H - 16, THUMB_W, 16, 0xD0309030);
+            const char *g = "Gesehen";
+            int gw = vita2d_pgf_text_width(s_font, 0.7f, g);
+            vita2d_pgf_draw_text(s_font, bx + (THUMB_W - gw) / 2, by + THUMB_H - 3, 0xFFFFFFFF, 0.7f, g);
+        }
+        uint32_t tcol = (flags & LIST_FLAG_WATCHED) ? COL_DIM : COL_TEXT;
 
         int tx = bx + THUMB_W + 14, tmax = SCREEN_W - tx - 30;
         if (sub && *sub) {
-            ui_text_clipped(tx, y + 30, tmax, COL_TEXT, t);
+            ui_text_clipped(tx, y + 30, tmax, tcol, t);
             char buf[256];
             snprintf(buf, sizeof buf, "%s", sub);
             /* Untertitel ebenfalls kürzen */
@@ -240,7 +249,7 @@ void ui_list_thumbs(int count, int cursor, int *scroll, ListThumbFn fn, void *ct
             }
             vita2d_pgf_draw_text(s_font, tx, y + 54, COL_DIM, 0.8f, buf);
         } else {
-            ui_text_clipped(tx, y + 42, tmax, COL_TEXT, t);
+            ui_text_clipped(tx, y + 42, tmax, tcol, t);
         }
     }
     if (count > visible) {

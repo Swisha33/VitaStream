@@ -223,6 +223,8 @@ static struct {
     char            info[160];
     int             frames_shown, frames_dropped, vdec_errors, vpackets;
     int64_t         wait_since;       /* seit wann Bilder auf den Audiostart warten */
+    volatile int64_t v_offset;        /* Korrektur der Bild-Zeitachse gegenüber dem Ton (µs) */
+    int             resyncs;
 } M;
 
 static void set_error(const char *fmt, const char *a)
@@ -249,6 +251,17 @@ static int64_t clock_get(void)
     int64_t c = clock_get_locked();
     pthread_mutex_unlock(&M.cm);
     return c;
+}
+
+static void clock_set_serial(int64_t pts, int audio, int serial)
+{
+    pthread_mutex_lock(&M.cm);
+    if (serial != M.serial) { pthread_mutex_unlock(&M.cm); return; }   /* veralteter Wert */
+    M.clock_pts = pts;
+    M.clock_wall = plat_now_us();
+    M.clock_valid = 1;
+    M.clock_audio = audio;
+    pthread_mutex_unlock(&M.cm);
 }
 
 static void clock_set(int64_t pts, int audio)
@@ -459,13 +472,15 @@ int media_current_frame(int *w, int *h, int *yuv)
             for (int i = 0; i < MEDIA_SLOTS; i++)
                 if (M.slot[i].st == FS_READY && M.slot[i].pts > newest) newest = M.slot[i].pts;
             if (audio_is_master()) {
-                /* Ton führt: Bilder aus der "alten" Zeitachse verwerfen */
-                for (int i = 0; i < MEDIA_SLOTS; i++) {
-                    int64_t d = M.slot[i].pts - clk;
-                    if (M.slot[i].st == FS_READY && (d > 5000000 || d < -5000000)) {
-                        M.slot[i].st = FS_FREE;
-                        M.frames_dropped++;
-                    }
+                /* Ton führt, Bild liegt weit daneben (Sprung mit getrennten Spuren, Werbeblock,
+                   Diskontinuität): Bild-Zeitachse an den Ton anlehnen statt Bilder zu verwerfen */
+                if (min_pts - clk > 2500000 || newest < clk - 2500000) {
+                    int64_t shift = clk - min_pts;
+                    M.v_offset += shift;
+                    for (int i = 0; i < MEDIA_SLOTS; i++)
+                        if (M.slot[i].st == FS_READY) M.slot[i].pts += shift;
+                    best = min_i;
+                    M.resyncs++;
                 }
             } else if (min_pts - clk > 2000000 || newest < clk - 2000000) {
                 clock_set(min_pts, 0);   /* Systemuhr springt mit */
@@ -549,8 +564,8 @@ static void *video_thread(void *arg)
         pthread_mutex_lock(&M.fm);
         FSlot *s = &M.slot[slot];
         if (dr == 1 && n.serial == M.serial) {
-            s->pts = res.pts90k >= 0 ? res.pts90k * 100 / 9
-                                     : av_rescale_q(ts, M.vtb, (AVRational){1, 1000000});
+            s->pts = (res.pts90k >= 0 ? res.pts90k * 100 / 9
+                                      : av_rescale_q(ts, M.vtb, (AVRational){1, 1000000})) + M.v_offset;
             s->w = res.width > 0 ? res.width : s->bw;
             s->h = res.height > 0 ? res.height : s->bh;
             s->yuv = M.vd->yuv;
@@ -663,10 +678,13 @@ static void *audio_thread(void *arg)
                 memcpy(outbuf[outidx], ring, sizeof outbuf[0]);
                 aout_write(outbuf[outidx]);
                 outidx = (outidx + 1) % 3;
+                /* Während aout_write kann gesprungen worden sein: dann gehört dieser Puffer
+                   zur alten Position und darf die Uhr nicht mehr setzen */
+                if (serial != M.serial) break;
                 if (ring_pts != AV_NOPTS_VALUE) {
                     /* aout_write kehrt zurück, wenn der Puffer übernommen wurde; hörbar ist etwa der vorige */
                     int64_t grain_us = (int64_t)AOUT_GRAIN * 1000000 / M.out_rate;
-                    clock_set(ring_pts - grain_us, 1);
+                    clock_set_serial(ring_pts - grain_us, 1, serial);
                     ring_pts += grain_us;
                 }
                 fill -= AOUT_GRAIN;
@@ -858,15 +876,18 @@ static void do_seek(void)
     if (target < 0) target = 0;
     if (M.duration && target > M.duration - 2000000) target = M.duration > 2000000 ? M.duration - 2000000 : 0;
 
+    pthread_mutex_lock(&M.cm);
     M.serial++;
+    M.clock_valid = 0;
+    pthread_mutex_unlock(&M.cm);
     pq_flush(&M.vq);
     pq_flush(&M.aq);
-    clock_invalidate();
     M.eof = 0;
     if (M.bsf) av_bsf_flush(M.bsf);
 
     M.v_eof = M.a_eof = 0;
     M.last_vts = M.last_ats = 0;
+    M.v_offset = 0;
     if (M.hls) {
         close_format();
         hls_seek(M.hls, target);
@@ -939,6 +960,10 @@ static void *demux_thread(void *arg)
         }
         if (M.split && pkt->dts != AV_NOPTS_VALUE) {
             int64_t t = av_rescale_q(pkt->dts, src->streams[pkt->stream_index]->time_base, (AVRational){1, 1000000});
+#ifndef __vita__
+            if (getenv("VS_DEBUG") && ((from_audio && !M.last_ats) || (!from_audio && !M.last_vts)))
+                fprintf(stderr, "[debug] erstes %s-Paket nach Start/Sprung: %.3fs\n", from_audio ? "Ton" : "Bild", t / 1e6);
+#endif
             if (from_audio) M.last_ats = t; else M.last_vts = t;
         }
         if (from_audio) {
@@ -1121,7 +1146,7 @@ int media_buffering(void)
 
 void media_debug(char *buf, int n)
 {
-    snprintf(buf, n, "%s\n%s-Decoder  Queue V:%d A:%d  Bilder:%d verw.:%d  Dec-Fehler:%d  Pakete:%d",
+    snprintf(buf, n, "%s\n%s-Decoder  Queue V:%d A:%d  Bilder:%d verw.:%d  Dec-Fehler:%d  Sync:%d (%+.1fs)",
              M.info[0] ? M.info : "-", M.vd ? M.vd->name : "-", pq_count(&M.vq), pq_count(&M.aq),
-             M.frames_shown, M.frames_dropped, M.vdec_errors, M.vpackets);
+             M.frames_shown, M.frames_dropped, M.vdec_errors, M.resyncs, M.v_offset / 1e6);
 }

@@ -9,6 +9,9 @@ SAN="-fsanitize=address,undefined -g -O1"
 gcc -Wall $SAN -o test_adblock test_adblock.c ../src/adblock.c
 ./test_adblock | tail -1
 
+gcc -Wall $SAN -o test_watched test_watched.c ../src/watched.c
+./test_watched
+
 python3 fake_dns.py 5353 & DNSPID=$!
 sleep 0.5
 gcc -Wall $SAN -DDNS_PORT=5353 -o test_dns test_dns.c ../src/dns.c

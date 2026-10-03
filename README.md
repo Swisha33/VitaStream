@@ -17,6 +17,8 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
   - *Eigene Websites* – per Muster in `sites.txt`
 - **Favoriten & Playlists** – mit Quadrat einzelne Einträge oder ganze Listen speichern; eigene Playlists bearbeiten (löschen, umbenennen, verschieben), defekte Streams automatisch entfernen, Online-Listen als bearbeitbare Kopie übernehmen
 - **Player** – MP4, HLS (inkl. AES-128 und separater Tonspuren), MPEG-TS; Hardware-H.264 bis 720p, Software-Ersatz für SD/Interlaced; AAC/MP3/AC3; Werbeunterbrechungen (Zeitsprünge) werden überbrückt
+- **Gesehen-Markierung** – automatisch ab 90 % oder am Ende, manuell über □ (auch für ganze Listen); Folgen von South Park und Mediatheken-Reihen in Staffel-/Folgenreihenfolge
+- **Proxy** – alle Verbindungen optional über einen SOCKS5- oder HTTP-Proxy (Einstellungen), z. B. den eigenen Server
 - **AdBlock** – lokale Blockliste + eigener DNS (AdGuard, Cloudflare, Quad9, eigener Server), einzeln schaltbar
 
 ## Bedienung
@@ -26,7 +28,8 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
 | Bestätigen (✕ oder ○, je nach Region) | öffnen / abspielen | Pause |
 | Zurück | eine Ebene zurück | Wiedergabe beenden |
 | △ | Suche (in der Quelle) / Einstellungen (Startseite) | – |
-| □ | Favoriten / Playlist-Menü | – |
+| □ | Menü: gesehen/ungesehen, Favoriten, Playlists, Bearbeiten | – |
+| ▲ / ▼ (Steuerkreuz) | Auswahl | vorheriger / nächster Eintrag (Senderwechsel, nächste Folge) |
 | SELECT | – | technische Infos (Decoder, Puffer) |
 | L / R | seitenweise blättern | ±60 s |
 | ◀ / ▶ | DNS-Preset wechseln (Einstellungen) | ±10 s |
@@ -141,6 +144,10 @@ LUA_SRC=./lua tests/run_tests.sh
 - **Formate:** Die Vita dekodiert H.264 per Hardware bis 1280×720. 1080p-Streams lassen sich nicht abspielen (bei HLS wird automatisch ≤720p gewählt). SD-Streams, die der Hardware-Decoder ablehnt (z. B. Interlaced-TV), laufen per Software. HEVC, VP9, AV1 und DRM (Widevine/SAMPLE-AES) gehen nicht.
 - **Netzwerk:** MP4 (Range-Anfragen) und HLS (Playlist, Segmente, AES-Schlüssel) laufen komplett über den eigenen Netzwerkstack – AdBlock, DNS und Header wie Referer gelten überall.
 - Der Player ist am Host mit Software-Ersatz für Decoder und Tonausgabe getestet; auf der Vita bitte mit SELECT die Decoder-Infos prüfen.
+
+## Lizenzen
+
+Siehe [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Projektstruktur
 

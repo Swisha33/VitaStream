@@ -108,7 +108,7 @@ int net_request(const char *url, const char *post, const char *hdr, NetBuf *out,
                           "<script>{\"hls\":\"https:\\/\\/cdn.scan.example\\/f1\\/index.m3u8\"}</script>"
                           "<iframe src=\"https://embed.example/p/9\"></iframe></html>");
     if (!strcmp(url, "https://scan.example/impressum"))
-        return reply(out, "<html><title>Impressum</title>keine Videos</html>");
+        return reply(out, "<html><head><title>Livestream</title><meta property=\"og:video\" content=\"https://cdn.scan.example/live/stream\"></head></html>");
     if (!strcmp(url, "https://embed.example/p/9"))
         return reply(out, "<source src=\"https://cdn.embed.example/v9.mp4\" type=\"video/mp4\">");
     /* South Park */
@@ -118,6 +118,7 @@ int net_request(const char *url, const char *post, const char *hdr, NetBuf *out,
                           "{\"type\":\"LineList\",\"props\":{\"items\":[{\"url\":\"/folgen/r1/south-park-rueckkehr-staffel-1-ep-1\",\"title\":\"Cartman und die Analsonde\"}]}}]}");
     if (strstr(url, "southpark.de/seasons/south-park/a1/staffel-2?json=true"))
         return reply(out, "{\"children\":[{\"type\":\"LineList\",\"props\":{\"items\":["
+                          "{\"url\":\"/folgen/x3/south-park-spaeter-staffel-2-ep-3\",\"title\":\"Spaetere Folge\"},"
                           "{\"url\":\"/folgen/x1/south-park-cartman-staffel-1-ep-1\",\"meta\":{\"header\":{\"title\":\"Cartman\"},\"subHeader\":\"Staffel 1 Ep 1\"},"
                           "\"media\":{\"image\":{\"url\":\"https://images.paramount.tech/uri/mgid:x1\"}}}],"
                           "\"loadMore\":{\"url\":\"/api/more/a1/2\"}}}]}");
@@ -203,6 +204,8 @@ int main(void) {
     for (int i = 0; i < l.count; i++) if (strstr(l.items[i].title, "Folge") == NULL) wrong++;
     printf("  Reihe '%s': %d Folgen nach allen Seiten, erste: %s\n", series, l.count, l.count ? l.items[0].title : "-");
     CHECK(l.count == 40 && wrong == 0 && l.items[l.count - 1].kind == ITEM_VIDEO);
+    CHECK(strstr(last_post, "\"sortOrder\":\"asc\"") != NULL);
+    CHECK(l.count >= 2 && !strcmp(l.items[0].title, "Folge 0") && !strcmp(l.items[1].title, "Folge 3"));
     plugins_list_free(&l);
     CHECK(browse(m, cat_id, &l) == 0 && l.count == 2);
     CHECK(strstr(last_post, "\"query\":\"film\"") && strstr(last_post, "\"duration_min\":4200") && strstr(last_post, "\"query\":\"ZDF\""));
@@ -302,7 +305,7 @@ int main(void) {
     CHECK(search(d, "scan.example", &l) == 0);
     printf("  Scanner: %d Treffer\n", l.count);
     for (int i = 0; i < l.count; i++) printf("    - %s | %s | %s\n", l.items[i].title, l.items[i].subtitle, l.items[i].thumb ? l.items[i].thumb : "-");
-    CHECK(l.count == 3);
+    CHECK(l.count == 4 && find_item(&l, "Livestream") >= 0);
     int fi = find_item(&l, "Folge 1 & mehr");
     CHECK(fi >= 0);
     if (fi >= 0) {
@@ -346,11 +349,13 @@ int main(void) {
     plugins_list_free(&l);
     CHECK(browse(sp, s1, &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Cartman und die Analsonde"));
     plugins_list_free(&l);
-    CHECK(browse(sp, s2, &l) == 0 && l.count == 2 && l.items[1].kind == ITEM_MORE);
-    if (l.count == 2) {
+    CHECK(browse(sp, s2, &l) == 0 && l.count == 3 && l.items[2].kind == ITEM_MORE);
+    if (l.count == 3) printf("  Folgen sortiert: %s, %s\n", l.items[0].title, l.items[1].title);
+    CHECK(l.count == 3 && !strcmp(l.items[1].title, "Spaetere Folge"));
+    if (l.count == 3) {
         CHECK(!strcmp(l.items[0].title, "Cartman") && l.items[0].thumb && strstr(l.items[0].thumb, "images.paramount.tech"));
         CHECK(resolve(sp, &l.items[0], &si) == 0 && !strcmp(si.url, "https://dai.example/sp/x1/master.m3u8"));
-        CHECK(browse(sp, l.items[1].id, &l2) == 0 && l2.count == 1 && !strcmp(l2.items[0].title, "Weight Gain"));
+        CHECK(browse(sp, l.items[2].id, &l2) == 0 && l2.count == 1 && !strcmp(l2.items[0].title, "Weight Gain"));
         plugins_list_free(&l2);
     }
     plugins_list_free(&l);

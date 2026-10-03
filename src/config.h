@@ -4,7 +4,7 @@
 #define VS_DATA_DIR    "ux0:data/VitaStream"
 #define VS_APP_DATA    "app0:data"
 #define VS_CONFIG_FILE VS_DATA_DIR "/config.ini"
-#define VS_APP_VERSION "0.4"
+#define VS_APP_VERSION "0.5"
 
 typedef struct {
     int  adblock_enabled;     /* lokale Blockliste aktiv */
@@ -14,6 +14,7 @@ typedef struct {
     char user_agent[160];
     int  timeout_sec;
     int  ssl_verify;          /* HTTPS-Zertifikate prüfen */
+    char proxy[192];          /* z. B. socks5h://host:1080, leer = kein Proxy */
 } VsConfig;
 
 extern VsConfig g_cfg;

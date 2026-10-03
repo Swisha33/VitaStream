@@ -114,6 +114,30 @@ local function collect_html(url)
   return seasons, episodes
 end
 
+-- Folgen nach Staffel/Episode sortieren (aus der URL: ...-staffel-3-ep-7 / -season-3-ep-7)
+local function ep_num(it)
+  local id = it.id or ""
+  local sn = tonumber(id:match("staffel%-(%d+)") or id:match("season%-(%d+)")) or 0
+  local en = tonumber(id:match("ep%-(%d+)") or id:match("folge%-(%d+)")) or 0
+  return sn * 1000 + en
+end
+
+local function episode_sort(list)
+  local more = {}
+  local eps = {}
+  for _, it in ipairs(list) do
+    if it.kind == "more" then more[#more + 1] = it else eps[#eps + 1] = it end
+  end
+  for i, it in ipairs(eps) do it._pos = i end
+  table.sort(eps, function(a, b)
+    local na, nb = ep_num(a), ep_num(b)
+    if na ~= nb and na > 0 and nb > 0 then return na < nb end
+    return a._pos < b._pos
+  end)
+  for _, it in ipairs(more) do eps[#eps + 1] = it end
+  return eps
+end
+
 local function season_sort(list)
   table.sort(list, function(a, b)
     local na, nb = tonumber(a.title:match("(%d+)")), tonumber(b.title:match("(%d+)"))
@@ -176,6 +200,7 @@ return {
       local _, episodes, more, err = list_page(season)
       if not episodes then return nil, err end
       if #episodes == 0 then return nil, err or "Keine Folgen gefunden" end
+      episodes = episode_sort(episodes)
       if more then episodes[#episodes + 1] = { title = "Weitere Folgen laden", kind = "more", id = "more:" .. abs(more) } end
       return episodes
     end
@@ -185,6 +210,7 @@ return {
       local data, err = get_json(more)
       if not data then return nil, err end
       local _, episodes, next_more = collect(data)
+      episodes = episode_sort(episodes)
       if next_more and abs(next_more) ~= more then
         episodes[#episodes + 1] = { title = "Weitere Folgen laden", kind = "more", id = "more:" .. abs(next_more) }
       end

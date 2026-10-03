@@ -23,6 +23,7 @@
 #include "plugins.h"
 #include "player.h"
 #include "thumbs.h"
+#include "watched.h"
 
 int _newlib_heap_size_user = 192 * 1024 * 1024;
 
@@ -52,6 +53,10 @@ static char    last_query[256];
 static int     set_cursor, set_scroll;
 static int     append_index;            /* Position des "Weitere laden"-Eintrags */
 static int     pending_is_search;       /* Herkunft der nächsten Liste */
+static int     play_index = -1;         /* gerade gespielter Eintrag in der aktuellen Liste */
+static char    play_key[2304];          /* Schlüssel für "Gesehen" */
+static char    play_title[256];
+static int     play_marked;
 static char   *pending_arg;
 
 /* Speichern in eine Playlist: Einträge nacheinander auflösen */
@@ -184,7 +189,17 @@ static void label_sources(void *ctx, int i, const char **t, const char **sub)
     *sub = s->description;
 }
 
-static void label_items(void *ctx, int i, const char **t, const char **sub, const char **thumb)
+/* Schlüssel für Gesehen-Markierungen: Plugin-Datei + Eintrags-ID */
+static const char *item_key(const PluginItem *it)
+{
+    static char key[2304];
+    Source *s = plugins_source(cur_src);
+    if (!s || !it->id || !it->id[0]) return NULL;
+    snprintf(key, sizeof key, "%s|%s", s->file, it->id);
+    return key;
+}
+
+static void label_items(void *ctx, int i, const char **t, const char **sub, const char **thumb, int *flags)
 {
     PluginList *l = ctx;
     static char buf[300];
@@ -200,12 +215,40 @@ static void label_items(void *ctx, int i, const char **t, const char **sub, cons
     }
     *sub = it->subtitle;
     *thumb = it->thumb;
+    *flags = (it->kind == ITEM_VIDEO && watched_get(item_key(it))) ? LIST_FLAG_WATCHED : 0;
 }
 
-static void label_sources_thumb(void *ctx, int i, const char **t, const char **sub, const char **thumb)
+static void label_sources_thumb(void *ctx, int i, const char **t, const char **sub, const char **thumb, int *flags)
 {
     label_sources(ctx, i, t, sub);
     *thumb = NULL;
+    *flags = 0;
+}
+
+/* Wiedergabe eines Eintrags der aktuellen Liste starten */
+static void start_play(int index)
+{
+    Level *lv = &stack[depth - 1];
+    if (index < 0 || index >= lv->list.count) return;
+    PluginItem *it = &lv->list.items[index];
+    if (plugins_start_resolve(cur_src, it) != 0) return;
+    play_index = index;
+    lv->cursor = index;
+    const char *k = item_key(it);
+    snprintf(play_key, sizeof play_key, "%s", k ? k : "");
+    snprintf(play_title, sizeof play_title, "%s", it->title);
+    play_marked = 0;
+    start_job_screen(PEND_PLAY, it->title);
+}
+
+/* nächsten/vorigen abspielbaren Eintrag der Liste suchen */
+static int neighbour_video(int from, int dir)
+{
+    if (depth == 0) return -1;
+    Level *lv = &stack[depth - 1];
+    for (int i = from + dir; i >= 0 && i < lv->list.count; i += dir)
+        if (lv->list.items[i].kind == ITEM_VIDEO) return i;
+    return -1;
 }
 
 /* ---------------- Playlists / Favoriten ---------------- */
@@ -381,13 +424,18 @@ static void item_menu(void)
     PluginItem *it = &lv->list.items[lv->cursor];
     PluginAction acts[8];
     int nacts = plugins_item_actions(cur_src, it, acts, 8);
-    const char *opts[12];
-    int k = 0, a_fav = -1, a_pl = -1, a_all = -1;
+    const char *opts[16];
+    int k = 0, a_fav = -1, a_pl = -1, a_all = -1, a_seen = -1, a_seen_all = -1, a_unseen_all = -1;
+    const char *key = item_key(it);
+    int seen = it->kind == ITEM_VIDEO && watched_get(key);
     for (int i = 0; i < nacts; i++) opts[k++] = acts[i].label;
     if (it->kind == ITEM_VIDEO) {
+        a_seen = k; opts[k++] = seen ? "Als ungesehen markieren" : "Als gesehen markieren";
         a_fav = k; opts[k++] = "Zu Favoriten hinzufuegen";
         a_pl  = k; opts[k++] = "Zu Playlist hinzufuegen...";
     }
+    a_seen_all = k;   opts[k++] = "Ganze Liste als gesehen markieren";
+    a_unseen_all = k; opts[k++] = "Ganze Liste als ungesehen markieren";
     a_all = k; opts[k++] = "Ganze Liste als Playlist speichern...";
     int c = ui_menu(it->title, opts, k);
     if (c < 0) return;
@@ -403,6 +451,12 @@ static void item_menu(void)
         if (a->input[0] && (!ui_input_text(a->input, a->def, input, sizeof input) || !input[0])) return;
         if (plugins_start_action(cur_src, it, a->id, a->input[0] ? input : NULL) == 0)
             start_job_screen(PEND_ACTION, a->label);
+        return;
+    }
+    if (c == a_seen) { watched_set(key, !seen); return; }
+    if (c == a_seen_all || c == a_unseen_all) {
+        for (int i = 0; i < lv->list.count; i++)
+            if (lv->list.items[i].kind == ITEM_VIDEO) watched_set(item_key(&lv->list.items[i]), c == a_seen_all);
         return;
     }
     if (c == a_fav || c == a_pl) {
@@ -421,7 +475,7 @@ static void item_menu(void)
 }
 
 enum {
-    SET_ADBLOCK, SET_DNS, SET_PRESET, SET_CUSTOM_DNS, SET_RELOAD_BL,
+    SET_ADBLOCK, SET_DNS, SET_PRESET, SET_CUSTOM_DNS, SET_RELOAD_BL, SET_PROXY,
     SET_ADD_PLAYLIST, SET_RELOAD_PLUGINS, SET_STATS, SET_COUNT
 };
 
@@ -460,6 +514,10 @@ static void label_settings(void *ctx, int i, const char **t, const char **sub)
         snprintf(tb, sizeof tb, "Plugins neu laden");
         snprintf(sb, sizeof sb, "%d Quellen geladen%s%s", plugins_source_count(),
                  plugins_last_log()[0] ? "  |  " : "", plugins_last_log());
+        break;
+    case SET_PROXY:
+        snprintf(tb, sizeof tb, "Proxy: %s", g_cfg.proxy[0] ? g_cfg.proxy : "AUS");
+        snprintf(sb, sizeof sb, "z. B. socks5h://server:1080 oder http://server:3128 - leer = aus");
         break;
     case SET_STATS:
         snprintf(tb, sizeof tb, "Anfragen: %d   Gesperrt: %d", g_net_stats.requests, g_net_stats.blocked);
@@ -516,6 +574,14 @@ static void settings_action(int i, int dir)
         }
         break;
     }
+    case SET_PROXY: {
+        char px[192];
+        if (ui_input_text("Proxy (leer = aus)", g_cfg.proxy[0] ? g_cfg.proxy : "socks5h://", px, sizeof px)) {
+            if (!strcmp(px, "socks5h://") || !strcmp(px, "http://")) px[0] = 0;
+            snprintf(g_cfg.proxy, sizeof g_cfg.proxy, "%s", px);
+        }
+        break;
+    }
     case SET_RELOAD_PLUGINS:
         stack_clear();
         plugins_reload();
@@ -542,6 +608,7 @@ int main(void)
     net_init();
     plugins_init();
     thumbs_init();
+    watched_load(VS_DATA_DIR "/watched.txt");
 
     if (!net_online())
         ui_message("Keine Verbindung", "Die Vita ist nicht mit dem Internet verbunden. "
@@ -599,7 +666,7 @@ int main(void)
                     append_index = lv->cursor;
                     if (plugins_start_browse(cur_src, it->id) == 0) start_job_screen(PEND_APPEND, lv->title);
                 } else {
-                    if (plugins_start_resolve(cur_src, it) == 0) start_job_screen(PEND_PLAY, it->title);
+                    start_play(lv->cursor);
                 }
             } else if (in.pressed & SCE_CTRL_TRIANGLE) {
                 search_in_current();
@@ -748,10 +815,33 @@ int main(void)
             if (in.pressed & SCE_CTRL_RTRIGGER)   player_seek_rel(60);
             if (in.pressed & SCE_CTRL_SELECT)     player_toggle_debug();
 
+            /* Gesehen: automatisch, sobald 90 % angeschaut sind */
+            {
+                uint64_t d = player_duration_ms(), p = player_position_ms();
+                if (!play_marked && play_key[0] && d > 60000 && p >= d * 9 / 10) {
+                    watched_set(play_key, 1);
+                    play_marked = 1;
+                }
+            }
+
+            /* Hoch/Runter: vorheriger/nächster Eintrag der Liste (Senderwechsel, nächste Folge) */
+            if ((in.pressed & (SCE_CTRL_UP | SCE_CTRL_DOWN)) && depth > 0) {
+                int next = neighbour_video(play_index, (in.pressed & SCE_CTRL_UP) ? -1 : 1);
+                if (next >= 0) {
+                    player_close();
+                    scr = SCR_LIST;
+                    start_play(next);
+                    break;
+                }
+            }
+
             int quit = (in.pressed & BTN_CANCEL) != 0;
             if (!quit && !player_active()) {
                 const char *e = player_error();
+                int ended = !e[0];
+                uint64_t d = player_duration_ms();
                 player_close();
+                if (ended && play_key[0] && d > 0) watched_set(play_key, 1);   /* bis zum Ende geschaut */
                 if (e[0]) ui_message("Wiedergabe beendet", e);
                 quit = 2;
             }
@@ -775,6 +865,9 @@ int main(void)
                 else     snprintf(line, sizeof line, "%s  (Live)", a);
                 /* Fehlerdetails bleiben nach Ende sichtbar, siehe player_error() */
 
+                ui_rect(0, 0, SCREEN_W, 40, 0xB0000000);
+                ui_text_clipped(20, 28, SCREEN_W - 260, COL_TEXT, play_title);
+                if (depth > 0) ui_text_scaled(SCREEN_W - 230, 28, COL_DIM, 0.8f, "Hoch/Runter: vorh./naechster");
                 ui_rect(0, SCREEN_H - 70, SCREEN_W, 70, 0xB0000000);
                 if (dur) {
                     int w = (int)((SCREEN_W - 40) * (double)pos / (double)dur);

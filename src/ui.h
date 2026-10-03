@@ -44,7 +44,8 @@ typedef void (*ListLabelFn)(void *ctx, int i, const char **title, const char **s
 void ui_list(int count, int cursor, int *scroll, ListLabelFn fn, void *ctx);
 
 /* Liste mit Vorschaubild links (thumb = URL oder NULL -> Platzhalter mit Initialen) */
-typedef void (*ListThumbFn)(void *ctx, int i, const char **title, const char **sub, const char **thumb);
+#define LIST_FLAG_WATCHED 1
+typedef void (*ListThumbFn)(void *ctx, int i, const char **title, const char **sub, const char **thumb, int *flags);
 void ui_list_thumbs(int count, int cursor, int *scroll, ListThumbFn fn, void *ctx);
 int  ui_list_thumbs_visible(void);
 

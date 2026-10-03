@@ -58,10 +58,10 @@ local function fmt_date(ts)
 end
 
 -- queries: Liste von { fields = {...}, query = "..." } (UND-verknuepft)
-local function query(queries, offset, size, min_minutes)
+local function query(queries, offset, size, min_minutes, order)
   local body = json.encode({
     queries = queries,
-    sortBy = "timestamp", sortOrder = "desc", future = false,
+    sortBy = "timestamp", sortOrder = order or "desc", future = false,
     offset = offset or 0, size = size or PAGE,
     duration_min = (min_minutes or 2) * 60,
   })
@@ -90,8 +90,19 @@ local function to_item(r, show_channel)
 end
 
 -- Ergebnisliste + "Weitere laden"
+-- Staffel/Folge aus dem Titel: "(S02/E05)", "Staffel 2 Folge 5", "Folge 12", "Teil 3"
+local function episode_key(title)
+  local s, e = title:match("[Ss](%d+)%s*/%s*[Ee](%d+)")
+  if not s then s, e = title:match("[Ss]taffel%s*(%d+).-[Ff]olge%s*(%d+)") end
+  if not s then s, e = title:match("[Ss](%d+)[Ee](%d+)") end
+  if s then return tonumber(s) * 10000 + tonumber(e) end
+  local n = title:match("[Ff]olge%s*(%d+)") or title:match("[Tt]eil%s*(%d+)") or title:match("[Ee]pisode%s*(%d+)")
+  return n and tonumber(n) or nil
+end
+
 local function results_page(queries, offset, min_minutes, more_prefix, show_channel, exact_topic)
-  local res, total = query(queries, offset, PAGE, min_minutes)
+  -- Sendereihen in Erscheinungsreihenfolge (aelteste zuerst), sonst neueste zuerst
+  local res, total = query(queries, offset, PAGE, min_minutes, exact_topic and "asc" or "desc")
   if not res then return nil, total end
   local items = {}
   for _, r in ipairs(res) do
@@ -103,6 +114,16 @@ local function results_page(queries, offset, min_minutes, more_prefix, show_chan
         items[#items + 1] = it
       end
     end
+  end
+  -- innerhalb der Seite nach Staffel/Folge ordnen, wenn alle Titel eine Nummer haben
+  if exact_topic and #items > 1 then
+    local all = true
+    for i, it in ipairs(items) do
+      it._k = episode_key(it.title)
+      it._pos = i
+      if not it._k then all = false end
+    end
+    if all then table.sort(items, function(a, b) if a._k ~= b._k then return a._k < b._k end return a._pos < b._pos end) end
   end
   local shown = offset + #res
   if #res == PAGE and (not total or shown < total) then

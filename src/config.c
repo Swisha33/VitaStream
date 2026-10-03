@@ -110,6 +110,7 @@ int config_load(void)
         else if (!strcmp(k, "dns_secondary")) snprintf(g_cfg.dns_secondary, sizeof g_cfg.dns_secondary, "%s", v);
         else if (!strcmp(k, "user_agent"))    snprintf(g_cfg.user_agent, sizeof g_cfg.user_agent, "%s", v);
         else if (!strcmp(k, "ssl_verify"))    g_cfg.ssl_verify = atoi(v) != 0;
+        else if (!strcmp(k, "proxy"))         snprintf(g_cfg.proxy, sizeof g_cfg.proxy, "%s", v);
         else if (!strcmp(k, "timeout"))       g_cfg.timeout_sec = atoi(v) > 0 ? atoi(v) : 20;
     }
     fclose(f);
@@ -131,10 +132,12 @@ int config_save(void)
         "timeout=%d\n"
         "# ssl_verify: HTTPS-Zertifikate pruefen (0 nur zur Fehlersuche)\n"
         "ssl_verify=%d\n"
+        "# proxy: alle Verbindungen ueber einen Proxy (socks5h://host:port oder http://host:port)\n"
+        "proxy=%s\n"
         "user_agent=%s\n",
         g_cfg.adblock_enabled, g_cfg.custom_dns_enabled,
         g_cfg.dns_primary, g_cfg.dns_secondary,
-        g_cfg.timeout_sec, g_cfg.ssl_verify, g_cfg.user_agent);
+        g_cfg.timeout_sec, g_cfg.ssl_verify, g_cfg.proxy, g_cfg.user_agent);
     fclose(f);
     return 0;
 }

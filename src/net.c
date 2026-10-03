@@ -214,6 +214,7 @@ static void common_opts(CURL *c, const char *url)
     /* Standard: Zertifikatsliste der Vita (vs0:data/external/cert/CA_LIST.cer, im
        curl-Paket voreingestellt). Eine eigene cacert.pem hat Vorrang. */
     if (s_have_ca) curl_easy_setopt(c, CURLOPT_CAINFO, CA_FILE);
+    if (g_cfg.proxy[0]) curl_easy_setopt(c, CURLOPT_PROXY, g_cfg.proxy);
     if (!g_cfg.ssl_verify) {
         curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
