@@ -12,6 +12,12 @@ gcc -Wall $SAN -o test_adblock test_adblock.c ../src/adblock.c
 gcc -Wall $SAN -o test_sub test_sub.c ../src/sub.c -lpthread
 ./test_sub
 
+gcc -Wall $SAN -o test_history test_history.c ../src/history.c
+./test_history
+
+gcc -Wall $SAN -o test_secure test_secure.c ../src/secure.c ../third_party/aes/aes.c
+./test_secure
+
 gcc -Wall $SAN -o test_watched test_watched.c ../src/watched.c
 ./test_watched
 
@@ -21,7 +27,7 @@ gcc -Wall $SAN -DDNS_PORT=5353 -o test_dns test_dns.c ../src/dns.c
 ./test_dns || { kill $DNSPID; exit 1; }
 kill $DNSPID
 
-gcc -Wall $SAN -I"$LUA_SRC" -o test_plugins test_plugins.c ../src/plugins.c ../src/adblock.c \
+gcc -Wall $SAN -I"$LUA_SRC" -o test_plugins test_plugins.c ../src/plugins.c ../src/adblock.c ../src/secure.c ../third_party/aes/aes.c \
     "$LUA_SRC/liblua.a" -lm -ldl -lpthread
 rm -rf run && D="run/ux0:data/VitaStream" && mkdir -p "$D/plugins"
 cp ../data/*.txt ../data/*.ini "$D/" && cp ../data/plugins/*.lua "$D/plugins/"

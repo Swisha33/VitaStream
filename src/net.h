@@ -69,6 +69,10 @@ int        net_live_read(NetLive *l, void *buf, int len);   /* blockiert; 0 = En
 void       net_live_abort(NetLive *l);
 void       net_live_close(NetLive *l);
 
+/* Datei herunterladen (über "<path>.part", danach umbenennen). done/total in Bytes (total 0 = unbekannt) */
+int        net_download(const char *url, const char *headers, const char *path,
+                        volatile int *abort_flag, volatile int64_t *done, volatile int64_t *total);
+
 const char *net_strerror(int code);
 
 #endif

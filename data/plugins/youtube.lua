@@ -11,16 +11,23 @@
 local json = require("json")
 
 local WEB_BASE = "https://www.youtube.com/youtubei/v1/"
+local API_BASE = "https://youtubei.googleapis.com/youtubei/v1/"
 local HL, GL = "de", "DE"
 
 local WEB = { clientName = "WEB", clientVersion = "2.20260901.01.00", hl = HL, gl = GL,
               timeZone = "Europe/Berlin", utcOffsetMinutes = 120 }
 local WEB_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36"
 
-local VISION = { clientName = "VISIONOS", clientVersion = "1.02", deviceMake = "Apple",
-                 deviceModel = "RealityDevice17,1", osName = "visionOS", osVersion = "26.5.23O471",
-                 hl = HL, gl = GL, timeZone = "UTC", utcOffsetMinutes = 0 }
 local VISION_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15"
+-- vollstaendiger Kontext (inkl. userAgent): ein knapper Kontext wird eher mit LOGIN_REQUIRED abgewiesen
+local VISION = { clientName = "VISIONOS", clientVersion = "1.02", deviceMake = "Apple",
+                 deviceModel = "RealityDevice17,1", userAgent = VISION_UA, osName = "visionOS",
+                 osVersion = "26.5.23O471", hl = HL, gl = GL, timeZone = "UTC", utcOffsetMinutes = 0 }
+-- Ersatz: Android-Client liefert direkte MP4-Dateien (Bild+Ton in einer Datei, meist 360p)
+local ANDROID_UA = "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip"
+local ANDROID = { clientName = "ANDROID", clientVersion = "21.26.364", androidSdkVersion = 30,
+                  userAgent = ANDROID_UA, osName = "Android", osVersion = "11", hl = HL, gl = GL }
+local CLIENT_IDS = { WEB = "1", ANDROID = "3", VISIONOS = "101" }
 
 -- Kanal-Reiter (InnerTube-Parameter)
 local TAB_VIDEOS    = "EgZ2aWRlb3PyBgQKAjoA"
@@ -53,25 +60,24 @@ local ANIME = {
 local function enc(s) return (s:gsub("[^%w%-_%.~]", function(c) return string.format("%%%02X", c:byte()) end)) end
 local function dec(s) return (s:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)) end
 
-local visitor = nil   -- X-Goog-Visitor-Id, aus der ersten Antwort uebernommen
+-- X-Goog-Visitor-Id: jede Antwort enthaelt eine aktuelle; nur fuer diese Sitzung merken
+-- (eine alte, gespeicherte Kennung fuehrt eher zu LOGIN_REQUIRED)
+local visitor = nil
 
 local function harvest_visitor(body)
   local v = body and body:match('"visitorData"%s*:%s*"([^"]+)"')
-  if v and not visitor then
-    visitor = v
-    vs.write_file("youtube_visitor.txt", v)
-  end
+  if v then visitor = v end
 end
 
-local function call(endpoint, payload, client, ua, extra_hdr)
+local function call(endpoint, payload, client, ua, extra_hdr, base)
   payload.context = { client = client }
   local hdr = "Content-Type: application/json\nUser-Agent: " .. ua ..
-              "\nOrigin: https://www.youtube.com\nX-Youtube-Client-Name: " ..
-              (client.clientName == "VISIONOS" and "101" or "1") ..
+              "\nX-Youtube-Client-Name: " .. (CLIENT_IDS[client.clientName] or "1") ..
               "\nX-Youtube-Client-Version: " .. client.clientVersion
+  if not base then hdr = hdr .. "\nOrigin: https://www.youtube.com" end
   if visitor then hdr = hdr .. "\nX-Goog-Visitor-Id: " .. visitor end
   if extra_hdr then hdr = hdr .. "\n" .. extra_hdr end
-  local body, status = vs.http_post(WEB_BASE .. endpoint .. "?prettyPrint=false", json.encode(payload), hdr)
+  local body, status = vs.http_post((base or WEB_BASE) .. endpoint .. "?prettyPrint=false", json.encode(payload), hdr)
   if not body then return nil, "YouTube nicht erreichbar: " .. tostring(status) end
   harvest_visitor(body)
   local ok, data = pcall(json.decode, body)
@@ -84,8 +90,6 @@ local function web(endpoint, payload) return call(endpoint, payload, WEB, WEB_UA
 
 local function ensure_visitor()
   if visitor then return end
-  local saved = vs.read_file("youtube_visitor.txt")
-  if saved and #saved > 10 then visitor = saved:gsub("%s+", ""); return end
   web("guide", {})   -- liefert responseContext.visitorData
 end
 
@@ -251,6 +255,7 @@ end
 
 return {
   name = "YouTube",
+  save_ref = true,   -- Stream-Adressen laufen ab: in Playlists Verweis speichern
   description = "Offizielle Kanaele (Pokemon, LEGO, Anime ...), Suche, Playlisten - bis 720p",
 
   browse = function(id)
@@ -325,24 +330,52 @@ return {
   resolve = function(item)
     local vid = item.id:match("^v:(.+)$") or item.id
     ensure_visitor()
-    local data, err = call("player", {
-      videoId = vid, contentCheckOk = true, racyCheckOk = true,
-      playbackContext = { contentPlaybackContext = { html5Preference = "HTML5_PREF_WANTS" } },
-    }, VISION, VISION_UA)
-    if not data then return nil, err end
-    local ps = data.playabilityStatus or {}
-    if ps.status and ps.status ~= "OK" then
-      return nil, "YouTube: " .. tostring(ps.reason or ps.status) ..
-                  (ps.status == "LOGIN_REQUIRED" and " (Altersbeschraenkung oder Anmeldung noetig)" or "")
+    local reasons = {}
+    local function why(ps)
+      local r = ps and (ps.reason or (ps.errorScreen and ps.errorScreen.playerErrorMessageRenderer and
+                txt(ps.errorScreen.playerErrorMessageRenderer.reason)) or ps.status)
+      if r and not reasons[r] then reasons[r] = true; reasons[#reasons + 1] = r end
     end
-    local sd = data.streamingData or {}
-    if sd.hlsManifestUrl then
-      return { url = sd.hlsManifestUrl, headers = { ["User-Agent"] = VISION_UA } }
+    local body = function()
+      return { videoId = vid, contentCheckOk = true, racyCheckOk = true,
+               playbackContext = { contentPlaybackContext = { html5Preference = "HTML5_PREF_WANTS" } } }
     end
-    -- Ersatz: progressive MP4 (itag 18 = 360p H.264/AAC), falls ohne Signatur vorhanden
-    for _, f in ipairs(sd.formats or {}) do
-      if f.url and (f.mimeType or ""):find("avc1", 1, true) then return f.url end
+
+    -- 1. visionOS: HLS bis 720p (auch Livestreams). Die erste Abweisung liefert eine frische
+    --    Besucher-ID mit - damit genau einmal wiederholen.
+    for attempt = 1, 2 do
+      local before = visitor
+      local data, err = call("player", body(), VISION, VISION_UA)
+      if not data then reasons[#reasons + 1] = err; break end
+      local sd = data.streamingData or {}
+      if sd.hlsManifestUrl then
+        return { url = sd.hlsManifestUrl, headers = { ["User-Agent"] = VISION_UA } }
+      end
+      why(data.playabilityStatus)
+      local st = data.playabilityStatus and data.playabilityStatus.status
+      if not (st == "LOGIN_REQUIRED" and visitor ~= before and attempt == 1) then break end
     end
-    return nil, "YouTube lieferte keinen abspielbaren Stream (evtl. Livestream-Ende oder Kopierschutz)"
+
+    -- 2. Android: direkte MP4-Datei (Bild und Ton zusammen)
+    local data = call("player", { videoId = vid, contentCheckOk = true, racyCheckOk = true },
+                      ANDROID, ANDROID_UA, nil, API_BASE)
+    if data then
+      local best
+      for _, f in ipairs((data.streamingData or {}).formats or {}) do
+        local mime = f.mimeType or ""
+        if f.url and mime:find("avc1", 1, true) and (tonumber(f.height) or 0) <= 720 then
+          if not best or (tonumber(f.height) or 0) > (tonumber(best.height) or 0) then best = f end
+        end
+      end
+      if best then return { url = best.url, headers = { ["User-Agent"] = ANDROID_UA } } end
+      why(data.playabilityStatus)
+    end
+
+    local msg = #reasons > 0 and table.concat(reasons, " / ") or "kein abspielbarer Stream"
+    if msg:find("LOGIN_REQUIRED") or msg:lower():find("bot") or msg:find("anmelden") or msg:find("Sign in") then
+      msg = msg .. "  -  YouTube verlangt hier eine Anmeldung (Altersfreigabe oder Bot-Pruefung). " ..
+            "Oft hilft es, kurz zu warten und es erneut zu versuchen."
+    end
+    return nil, "YouTube: " .. msg
   end,
 }

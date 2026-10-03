@@ -15,3 +15,9 @@ tests/test_media
 tests/bl_media.txt
 tests/test_watched
 tests/test_sub
+tests/test_history
+tests/hist_run/
+tests/test_dl
+tests/dlrun/
+tests/test_secure
+tests/sec_run/

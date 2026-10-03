@@ -52,7 +52,7 @@ void config_install_defaults(void)
        Rückfall - normalerweise wird der Plugin-Ordner der App durchsucht. */
     static const char *plugins_fallback[] = {
         "json.lua", "m3ulib.lua", "direct.lua", "m3u.lua", "mediathek.lua", "website.lua", "finder.lua",
-        "southpark.lua", "jellyfin.lua", "explorer.lua", "youtube.lua", "pluto.lua", "audiothek.lua",
+        "southpark.lua", "jellyfin.lua", "explorer.lua", "youtube.lua", "pluto.lua", "audiothek.lua", "adultswim.lua", "downloads.lua",
     };
     char found[48][64];
     int nfound = 0;
@@ -130,6 +130,8 @@ int config_load(void)
         else if (!strcmp(k, "proxy"))         snprintf(g_cfg.proxy, sizeof g_cfg.proxy, "%s", v);
         else if (!strcmp(k, "audio_lang"))    snprintf(g_cfg.audio_lang, sizeof g_cfg.audio_lang, "%s", v);
         else if (!strcmp(k, "theme"))         g_cfg.theme = atoi(v);
+        else if (!strcmp(k, "custom_colors")) snprintf(g_cfg.custom_colors, sizeof g_cfg.custom_colors, "%s", v);
+        else if (!strcmp(k, "menu_music"))    snprintf(g_cfg.menu_music, sizeof g_cfg.menu_music, "%s", v);
         else if (!strcmp(k, "timeout"))       g_cfg.timeout_sec = atoi(v) > 0 ? atoi(v) : 20;
     }
     fclose(f);
@@ -157,10 +159,14 @@ int config_save(void)
         "audio_lang=%s\n"
         "# theme: Farbthema (0 = Standard)\n"
         "theme=%d\n"
+        "# custom_colors: eigenes Thema, 6x RRGGBB (Hintergrund,Flaechen,Auswahl,Akzent,Text,Nebentext)\n"
+        "custom_colors=%s\n"
+        "# menu_music: Datei in ux0:data/VitaStream/music/ (leer = aus)\n"
+        "menu_music=%s\n"
         "user_agent=%s\n",
         g_cfg.adblock_enabled, g_cfg.custom_dns_enabled,
         g_cfg.dns_primary, g_cfg.dns_secondary,
-        g_cfg.timeout_sec, g_cfg.ssl_verify, g_cfg.proxy, g_cfg.audio_lang, g_cfg.theme, g_cfg.user_agent);
+        g_cfg.timeout_sec, g_cfg.ssl_verify, g_cfg.proxy, g_cfg.audio_lang, g_cfg.theme, g_cfg.custom_colors, g_cfg.menu_music, g_cfg.user_agent);
     fclose(f);
     return 0;
 }

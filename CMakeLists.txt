@@ -13,7 +13,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "VitaStream")
 set(VITA_TITLEID  "VSTR00001")
-set(VITA_VERSION  "00.70")
+set(VITA_VERSION  "00.80")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall -Wno-unused-function")
@@ -43,6 +43,9 @@ add_executable(${PROJECT_NAME}
   src/thumbfetch.c
   src/watched.c
   src/sub.c
+  src/history.c
+  src/secure.c
+  src/dl.c
   third_party/aes/aes.c
 )
 
@@ -113,6 +116,8 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE data/plugins/youtube.lua data/plugins/youtube.lua
   FILE data/plugins/pluto.lua data/plugins/pluto.lua
   FILE data/plugins/audiothek.lua data/plugins/audiothek.lua
+  FILE data/plugins/adultswim.lua data/plugins/adultswim.lua
+  FILE data/plugins/downloads.lua data/plugins/downloads.lua
   FILE data/config.ini data/config.ini
   FILE data/cacert.pem data/cacert.pem
   FILE data/blocklist.txt data/blocklist.txt

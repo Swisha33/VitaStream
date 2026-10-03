@@ -15,16 +15,22 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
   - *Audiothek* – Internetradio weltweit (nach Land, Genre, Suche) und Podcasts (Suche, Charts, ARD/ZDF/DLF …), getrennt von der Video-Mediathek
   - *Sender-Finder* – tausende frei empfangbare Sender (iptv-org) nach Kategorie, Land, Sprache; Pluto TV, Samsung TV Plus, Rakuten TV; Anime & Zeichentrick
   - *South Park* – alle Staffeln von southpark.de (Deutsch/Englisch)
-  - *Jellyfin* – eigener Jellyfin-Server: Mediathek 1:1 abgebildet (Ansichten → Serien → Staffeln → Folgen), Server transkodiert bei Bedarf nach H.264/720p
+  - *Jellyfin* – eigener Server: Anmeldung in drei Schritten (Adresse, Benutzer, Passwort), Passwort wird nie gespeichert, Zugriffs-Token nur gerätegebunden verschlüsselt; Mediathek wie auf dem Server; der Server entscheidet per Geräteprofil zwischen Direktwiedergabe und Umwandlung (MKV, HEVC, 10-Bit, DTS laufen dadurch auch), Untertitel des Servers
+  - *Adult Swim* – kostenlos freigeschaltete Folgen von adultswim.com (USA-Angebot, teils kopiergeschützt)
+  - *Downloads* – heruntergeladene Videos und Podcasts offline abspielen
   - *M3U-Playlists & Favoriten* – eigene Listen, Logos, Gruppen
   - *Direkte URL & Website-Scanner* – Link abspielen oder eine Website nach Videos/Streams durchsuchen
   - *Website-Explorer* – Website eingeben, ihre Suche nutzen (Top-5-Treffer), alle Videos und Player einer Seite auflisten; spielt direkte Links und offene Plattformen (archive.org, Vimeo, Dailymotion, PeerTube) ab – keine Entschlüsselung verschleierter Hoster
   - *Eigene Websites* – per Muster in `sites.txt`
 - **Favoriten & Playlists** – mit Quadrat einzelne Einträge oder ganze Listen speichern; eigene Playlists bearbeiten (löschen, umbenennen, verschieben), defekte Streams automatisch entfernen, Online-Listen als bearbeitbare Kopie übernehmen
 - **Player** – MP4, HLS (inkl. AES-128 und separater Tonspuren), MPEG-TS; Hardware-H.264 bis 720p, Software-Ersatz für SD/Interlaced; AAC/MP3/AC3; Werbeunterbrechungen (Zeitsprünge) werden überbrückt
+- **Zuletzt gesehen** – ganz oben auf der Startseite, mit der Stelle, an der du aufgehört hast
+- **Weiterschauen** – angefangene Videos sind markiert (Balken auf dem Vorschaubild); beim Start Abfrage „Weiterschauen“ oder „Von Anfang an“
+- **Herunterladen** – □-Menü → „Herunterladen“ für direkte Dateien (Mediatheken, Podcasts, Internet Archive, eigene Jellyfin-Dateien); nicht für Streams und YouTube
+- **Hintergrundwiedergabe** – Musik, Radio, Podcasts laufen beim Stöbern in der App weiter (Zurück im Player; SELECT: zurück zum Player, START: Stopp)
 - **Ton & Untertitel** – im Player mit △: Tonspur wählen (HLS-Sprachspuren oder mehrere Spuren in MP4/TS, Sprache wird gemerkt), Untertitel ein/aus (WebVTT aus HLS, TTML/WebVTT/SRT der Mediatheken)
 - **Internetradio** – endlose Streams (Icecast/Shoutcast) laufen direkt, auch in eigenen M3U-Listen
-- **Themen** – Standard, PS1, PS2, PS3 (XMB), PSP, Vita, Dunkel (OLED), Hell – in den Einstellungen
+- **Themen** – Standard, PS1, PS2, PS3 (XMB), PSP, Vita, Dunkel (OLED), Hell oder eigenes Thema mit selbst gewählten Farben; Menümusik aus `ux0:data/VitaStream/music/`
 - **Gesehen-Markierung** – automatisch ab 90 % oder am Ende, manuell über □ (auch für ganze Listen); Folgen von South Park und Mediatheken-Reihen in Staffel-/Folgenreihenfolge
 - **Proxy** – alle Verbindungen optional über einen SOCKS5- oder HTTP-Proxy (Einstellungen), z. B. den eigenen Server
 - **AdBlock** – lokale Blockliste + eigener DNS (AdGuard, Cloudflare, Quad9, eigener Server), einzeln schaltbar
@@ -38,10 +44,10 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
 | △ | Suche (in der Quelle) / Einstellungen (Startseite) | Ton & Untertitel |
 | □ | Menü: gesehen/ungesehen, Favoriten, Playlists, Bearbeiten | – |
 | ▲ / ▼ (Steuerkreuz) | Auswahl | zweimal drücken: vorheriger / nächster Eintrag (Schutz vor versehentlichem Umschalten) |
-| SELECT | – | technische Infos (Decoder, Puffer) |
+| SELECT | zurück zum Player (bei Hintergrundwiedergabe) | technische Infos (Decoder, Puffer) |
 | L / R | seitenweise blättern | ±60 s |
 | ◀ / ▶ | DNS-Preset wechseln (Einstellungen) | ±10 s |
-| START | App beenden | – |
+| START | App beenden | Wiedergabe stoppen |
 
 ## Dateien auf der Vita
 

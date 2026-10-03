@@ -1,4 +1,5 @@
 #include "plugins.h"
+#include "secure.h"
 #include "net.h"
 #include "config.h"
 
@@ -7,6 +8,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <sys/stat.h>
 #include <pthread.h>
 
 #include <lua.h>
@@ -50,6 +52,25 @@ static int l_http(lua_State *ls, int is_post)
 
 static int l_http_get(lua_State *ls)  { return l_http(ls, 0); }
 static int l_http_post(lua_State *ls) { return l_http(ls, 1); }
+
+/* vs.secret_get(name) / vs.secret_set(name, wert|nil): verschlüsselt, gerätegebunden (secure.c) */
+static int l_secret_get(lua_State *ls)
+{
+    char *v = secure_get(luaL_checkstring(ls, 1));
+    if (!v) { lua_pushnil(ls); return 1; }
+    lua_pushstring(ls, v);
+    memset(v, 0, strlen(v));
+    free(v);
+    return 1;
+}
+
+static int l_secret_set(lua_State *ls)
+{
+    const char *name = luaL_checkstring(ls, 1);
+    const char *val = lua_isnoneornil(ls, 2) ? NULL : luaL_checkstring(ls, 2);
+    lua_pushboolean(ls, secure_put(name, val) == 0);
+    return 1;
+}
 
 /* vs.probe(url [, headers]) -> ok, info : prüft, ob ein Stream antwortet (lädt nur den Anfang) */
 static int l_probe(lua_State *ls)
@@ -195,6 +216,43 @@ static int l_delete_file(lua_State *ls)
     return 1;
 }
 
+/* vs.list_downloads() -> { {name=..., size=...}, ... } (nur ux0:data/VitaStream/downloads) */
+static int l_list_downloads(lua_State *ls)
+{
+    lua_newtable(ls);
+    DIR *d = opendir(VS_DATA_DIR "/downloads");
+    if (!d) return 1;
+    struct dirent *e;
+    int n = 0;
+    while ((e = readdir(d))) {
+        size_t l = strlen(e->d_name);
+        if (e->d_name[0] == '.' || (l > 5 && !strcmp(e->d_name + l - 5, ".part"))) continue;
+        char path[512];
+        snprintf(path, sizeof path, VS_DATA_DIR "/downloads/%s", e->d_name);
+        struct stat st;
+        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        lua_newtable(ls);
+        lua_pushstring(ls, e->d_name); lua_setfield(ls, -2, "name");
+        lua_pushnumber(ls, (lua_Number)st.st_size); lua_setfield(ls, -2, "size");
+        lua_pushstring(ls, path); lua_setfield(ls, -2, "path");
+        lua_rawseti(ls, -2, ++n);
+    }
+    closedir(d);
+    return 1;
+}
+
+/* vs.delete_download(name): nur Dateien direkt im Download-Ordner */
+static int l_delete_download(lua_State *ls)
+{
+    const char *name = luaL_checkstring(ls, 1);
+    if (!*name || name[0] == '.' || strstr(name, "..") || strchr(name, ':') || strchr(name, '/') || strchr(name, '\\'))
+        return luaL_error(ls, "ungueltiger Dateiname");
+    char path[512];
+    snprintf(path, sizeof path, VS_DATA_DIR "/downloads/%s", name);
+    lua_pushboolean(ls, remove(path) == 0);
+    return 1;
+}
+
 static int l_log(lua_State *ls)
 {
     snprintf(s_log, sizeof s_log, "%s", luaL_checkstring(ls, 1));
@@ -214,6 +272,10 @@ static const luaL_Reg vs_funcs[] = {
     {"read_file",     l_read_file},
     {"write_file",    l_write_file},
     {"delete_file",   l_delete_file},
+    {"secret_get",    l_secret_get},
+    {"list_downloads", l_list_downloads},
+    {"delete_download", l_delete_download},
+    {"secret_set",    l_secret_set},
     {"log",           l_log},
     {NULL, NULL}
 };
@@ -284,6 +346,9 @@ static void register_source(const char *file)
     snprintf(s->file, sizeof s->file, "%s", file);
     s->has_search = has_func(L, t, "search");
     s->has_browse = has_func(L, t, "browse");
+    lua_getfield(L, t, "save_ref");
+    s->save_ref = lua_toboolean(L, -1);
+    lua_pop(L, 1);
     s->ref = luaL_ref(L, LUA_REGISTRYINDEX);
     s_nsources++;
 }
@@ -610,6 +675,28 @@ int plugins_start_search_ctx(int src, const char *q, const char *ctx)
 int plugins_start_browse(int src, const char *id) { return start(OP_BROWSE, src, id, LUA_NOREF); }
 int plugins_start_resolve(int src, const PluginItem *it) { return start(OP_RESOLVE, src, NULL, it->ref); }
 
+static int s_tmp_ref = LUA_NOREF;
+
+int plugins_start_resolve_id(int src, const char *id, const char *title)
+{
+    if (W.state == JOB_RUNNING || src < 0 || src >= s_nsources || !L) return -1;
+    pthread_mutex_lock(&s_lua_lock);
+    if (s_tmp_ref != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, s_tmp_ref);
+    lua_createtable(L, 0, 3);
+    lua_pushstring(L, id);    lua_setfield(L, -2, "id");
+    lua_pushstring(L, title ? title : id); lua_setfield(L, -2, "title");
+    lua_pushstring(L, "video"); lua_setfield(L, -2, "kind");
+    s_tmp_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    pthread_mutex_unlock(&s_lua_lock);
+    return start(OP_RESOLVE, src, NULL, s_tmp_ref);
+}
+
+int plugins_find_source(const char *file)
+{
+    for (int i = 0; i < s_nsources; i++) if (!strcmp(s_sources[i].file, file)) return i;
+    return -1;
+}
+
 JobState    plugins_job_state(void) { return W.state; }
 const char *plugins_job_error(void) { return W.err; }
 const char *plugins_last_log(void)  { return s_log; }
@@ -698,6 +785,7 @@ void plugins_shutdown(void)
     free(W.arg2);
     if (L) lua_close(L);
     L = NULL;
+    s_tmp_ref = LUA_NOREF;
 }
 
 /* Hinweis: Vor dem Aufruf müssen alle PluginLists freigegeben sein. */
@@ -707,6 +795,7 @@ int plugins_reload(void)
     pthread_mutex_lock(&s_lua_lock);
     if (L) lua_close(L);
     L = NULL;
+    s_tmp_ref = LUA_NOREF;
     s_log[0] = 0;
     int n = load_all();
     pthread_mutex_unlock(&s_lua_lock);

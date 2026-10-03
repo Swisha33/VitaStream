@@ -187,6 +187,24 @@ int net_check_url(const char *url)
     return prepare_host(url, tmp, sizeof tmp);
 }
 
+/* Adresse säubern: Leerzeichen am Rand entfernen, innere Leerzeichen und Steuerzeichen
+   kodieren (curl lehnt sie sonst mit "URL using bad/illegal format" ab) */
+static char *clean_url(const char *in)
+{
+    while (*in == ' ' || *in == '\t' || *in == '\r' || *in == '\n') in++;
+    size_t n = strlen(in);
+    while (n && (in[n - 1] == ' ' || in[n - 1] == '\t' || in[n - 1] == '\r' || in[n - 1] == '\n')) n--;
+    char *out = malloc(n * 3 + 1), *o = out;
+    if (!out) return strdup("");
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c <= ' ' || c == '"' || c == '<' || c == '>' || c == 0x7F) o += sprintf(o, "%%%02X", c);
+        else *o++ = (char)c;
+    }
+    *o = 0;
+    return out;
+}
+
 static struct curl_slist *build_headers(const char *headers)
 {
     struct curl_slist *list = NULL;
@@ -234,7 +252,7 @@ int net_request_ex(const char *url_in, const char *post_body, const char *header
     memset(out, 0, sizeof *out);
     if (status) *status = 0;
 
-    char *url = strdup(url_in);
+    char *url = clean_url(url_in);
     int result = NET_ERR;
 
     for (int hop = 0; hop <= MAX_REDIR; hop++) {
@@ -310,7 +328,7 @@ static size_t capped_write(char *ptr, size_t sz, size_t nm, void *ud)
 
 int net_probe(const char *url_in, const char *headers, int timeout_s, char *info, int infolen)
 {
-    char *url = strdup(url_in);
+    char *url = clean_url(url_in);
     int ok = 0;
     snprintf(info, infolen, "keine Antwort");
     char hdr[1200];
@@ -551,7 +569,7 @@ static size_t live_hdr_cb(char *b, size_t sz, size_t nm, void *ud)
 
 int net_detect_live(const char *url_in, const char *headers, char *final_url, int fl)
 {
-    char *url = strdup(url_in);
+    char *url = clean_url(url_in);
     int result = -1;
     for (int hop = 0; hop <= MAX_REDIR; hop++) {
         char resolve[300];
@@ -669,7 +687,7 @@ NetLive *net_live_open(const char *url, const char *headers)
 {
     NetLive *l = calloc(1, sizeof *l);
     if (!l) return NULL;
-    l->url = strdup(url);
+    l->url = clean_url(url);
     l->headers = headers ? strdup(headers) : NULL;
     l->ring = malloc(LIVE_CAP);
     if (!l->ring || prepare_host(l->url, l->resolve, sizeof l->resolve) != NET_OK) goto fail;
@@ -724,4 +742,77 @@ void net_live_close(NetLive *l)
     pthread_mutex_destroy(&l->m);
     pthread_cond_destroy(&l->cv);
     free(l->ring); free(l->url); free(l->headers); free(l);
+}
+
+/* ================================================================ Download in eine Datei */
+
+typedef struct { FILE *f; volatile int *abort; volatile int64_t *done, *total; } DlCtx;
+
+static size_t dl_write(char *p, size_t sz, size_t nm, void *ud)
+{
+    DlCtx *d = ud;
+    if (d->abort && *d->abort) return 0;
+    return fwrite(p, sz, nm, d->f) * sz;
+}
+
+static int dl_progress(void *ud, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ut, curl_off_t un)
+{
+    (void)ut; (void)un;
+    DlCtx *d = ud;
+    if (d->done) *d->done = (int64_t)dlnow;
+    if (d->total && dltotal > 0) *d->total = (int64_t)dltotal;
+    return (d->abort && *d->abort) ? 1 : 0;
+}
+
+int net_download(const char *url_in, const char *headers, const char *path,
+                 volatile int *abort_flag, volatile int64_t *done, volatile int64_t *total)
+{
+    char *url = clean_url(url_in);
+    char part[600];
+    snprintf(part, sizeof part, "%s.part", path);
+    int result = NET_ERR;
+    for (int hop = 0; hop <= MAX_REDIR; hop++) {
+        char resolve[300];
+        int pr = prepare_host(url, resolve, sizeof resolve);
+        if (pr != NET_OK) { result = pr; break; }
+        FILE *f = fopen(part, "wb");
+        if (!f) { set_detail("Datei nicht schreibbar: %s", part, 0); break; }
+        CURL *c = curl_easy_init();
+        if (!c) { fclose(f); break; }
+        common_opts(c, url);
+        curl_easy_setopt(c, CURLOPT_TIMEOUT, 0L);
+        curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
+        curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 30L);
+        curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, NULL);
+        struct curl_slist *rl = NULL, *hl = build_headers(headers);
+        if (resolve[0]) { rl = curl_slist_append(NULL, resolve); curl_easy_setopt(c, CURLOPT_RESOLVE, rl); }
+        if (hl) curl_easy_setopt(c, CURLOPT_HTTPHEADER, hl);
+        DlCtx d = { f, abort_flag, done, total };
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, dl_write);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &d);
+        curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, dl_progress);
+        curl_easy_setopt(c, CURLOPT_XFERINFODATA, &d);
+        g_net_stats.requests++;
+        CURLcode cr = curl_easy_perform(c);
+        long code = 0;
+        char *redir = NULL;
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+        curl_easy_getinfo(c, CURLINFO_REDIRECT_URL, &redir);
+        char *next = (cr == CURLE_OK && code >= 300 && code < 400 && redir) ? strdup(redir) : NULL;
+        curl_slist_free_all(rl);
+        curl_slist_free_all(hl);
+        curl_easy_cleanup(c);
+        fclose(f);
+        if (next) { free(url); url = next; continue; }
+        if (abort_flag && *abort_flag) { result = NET_ABORTED; break; }
+        if (cr != CURLE_OK) { set_detail("%s (curl %ld)", curl_easy_strerror(cr), (long)cr); break; }
+        if (code >= 400) { set_detail("HTTP %s%ld", "", code); break; }
+        remove(path);
+        result = rename(part, path) == 0 ? NET_OK : NET_ERR;
+        break;
+    }
+    if (result != NET_OK) remove(part);
+    free(url);
+    return result;
 }

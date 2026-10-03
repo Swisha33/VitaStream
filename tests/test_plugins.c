@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include "../src/net.h"
 #include "../src/config.h"
 #include "../src/adblock.h"
@@ -52,12 +53,19 @@ static int mediathek_reply(const char *post, NetBuf *out)
 }
 
 /* --- simulierter Jellyfin-Server --- */
+static int jelly_logouts;
+static char jelly_pb_post[8192];
 static int jelly_reply(const char *url, const char *post, NetBuf *out, long *status) {
     if (strstr(url, "/Users/AuthenticateByName")) {
         snprintf(last_post, sizeof last_post, "%s", post ? post : "");
         if (!post || !strstr(post, "\"Pw\":\"geheim\"")) { if (status) *status = 401; return reply(out, "{}"); }
         return reply(out, "{\"AccessToken\":\"TOK123\",\"User\":{\"Id\":\"u1\"}}");
     }
+    if (strstr(url, "/System/Info/Public")) {
+        if (!strstr(url, "jelly.example:8096")) { if (status) *status = 404; return reply(out, "nicht hier"); }
+        return reply(out, "{\"ServerName\":\"Heimkino\",\"Version\":\"10.10\"}");
+    }
+    if (strstr(url, "/Sessions/Logout")) { jelly_logouts++; if (status) *status = 204; return reply(out, ""); }
     if (strstr(url, "/System/Info")) return reply(out, "{\"Version\":\"10.9\"}");
     if (strstr(url, "/Users/u1/Views"))
         return reply(out, "{\"Items\":[{\"Id\":\"libmov\",\"Name\":\"Filme\",\"Type\":\"CollectionFolder\",\"CollectionType\":\"movies\"},"
@@ -80,13 +88,20 @@ static int jelly_reply(const char *url, const char *post, NetBuf *out, long *sta
     if (strstr(url, "ParentId=libmov"))
         return reply(out, "{\"Items\":[{\"Id\":\"mov1\",\"Name\":\"Film H264\",\"Type\":\"Movie\",\"ProductionYear\":2021},"
                           "{\"Id\":\"mov2\",\"Name\":\"Film HEVC\",\"Type\":\"Movie\",\"ProductionYear\":2022}],\"TotalRecordCount\":2}");
-    /* PlaybackInfo */
-    if (strstr(url, "/Items/mov1/PlaybackInfo"))
-        return reply(out, "{\"MediaSources\":[{\"Id\":\"mov1\",\"Container\":\"mp4\",\"MediaStreams\":[{\"Type\":\"Video\",\"Codec\":\"h264\",\"Height\":720}]}]}");
-    if (strstr(url, "/Items/mov2/PlaybackInfo"))
-        return reply(out, "{\"MediaSources\":[{\"Id\":\"src2\",\"Container\":\"mkv\",\"MediaStreams\":[{\"Type\":\"Video\",\"Codec\":\"hevc\",\"Height\":1080}]}]}");
-    if (strstr(url, "/Items/ep1/PlaybackInfo"))
-        return reply(out, "{\"MediaSources\":[{\"Id\":\"ep1\",\"Container\":\"mp4\",\"MediaStreams\":[{\"Type\":\"Video\",\"Codec\":\"h264\",\"Height\":1080}]}]}");
+    /* PlaybackInfo (POST mit Geraeteprofil): Server entscheidet */
+    if (strstr(url, "/PlaybackInfo")) {
+        snprintf(jelly_pb_post, sizeof jelly_pb_post, "%s", post ? post : "");
+        if (!post || !strstr(post, "\"DeviceProfile\"")) { if (status) *status = 400; return reply(out, "{}"); }
+        if (strstr(url, "/Items/mov1/"))
+            return reply(out, "{\"PlaySessionId\":\"ps1\",\"MediaSources\":[{\"Id\":\"mov1\",\"Container\":\"mp4\",\"SupportsDirectPlay\":true,"
+                "\"MediaStreams\":[{\"Type\":\"Video\",\"Codec\":\"h264\",\"Height\":720},"
+                "{\"Type\":\"Subtitle\",\"Index\":3,\"DisplayTitle\":\"Deutsch - SRT\",\"DeliveryMethod\":\"External\",\"DeliveryUrl\":\"/Videos/mov1/mov1/Subtitles/3/0/Stream.vtt\"}]}]}");
+        if (strstr(url, "/Items/mov2/") || strstr(url, "/Items/ep1/"))
+            return reply(out, "{\"PlaySessionId\":\"ps2\",\"MediaSources\":[{\"Id\":\"src2\",\"Container\":\"mkv\",\"SupportsDirectPlay\":false,"
+                "\"TranscodingUrl\":\"/videos/x/master.m3u8?DeviceId=d&MediaSourceId=src2&VideoCodec=h264&api_key=TOK123\",\"TranscodeReasons\":\"ContainerNotSupported\","
+                "\"MediaStreams\":[{\"Type\":\"Video\",\"Codec\":\"hevc\",\"Height\":1080}]}]}");
+        return reply(out, "{\"ErrorCode\":\"NoCompatibleStream\"}");
+    }
     if (strstr(url, "/Users/u1/Items?searchTerm="))
         return reply(out, "{\"Items\":[{\"Id\":\"mov2\",\"Name\":\"Film HEVC\",\"Type\":\"Movie\",\"ProductionYear\":2022}]}");
     if (status) *status = 404;
@@ -122,6 +137,25 @@ static int audio_reply(const char *url, NetBuf *out, long *status) {
     return NET_ERR;
 }
 
+/* --- simulierte Adult-Swim-API --- */
+static int as_reply(const char *url, const char *post, NetBuf *out, long *status) {
+    if (strstr(url, "adultswim.com/api/search")) {
+        snprintf(last_post, sizeof last_post, "%s", post ? post : "");
+        if (post && strstr(post, "rick-and-morty"))
+            return reply(out, "{\"data\":{\"getShowBySlug\":{\"title\":\"Rick and Morty\",\"videos\":{\"edges\":["
+                "{\"node\":{\"_id\":\"e2\",\"title\":\"Lawnmower Dog\",\"auth\":false,\"seasonNumber\":1,\"episodeNumber\":2,\"duration\":1320}},"
+                "{\"node\":{\"_id\":\"e9\",\"title\":\"Gesperrt\",\"auth\":true,\"seasonNumber\":1,\"episodeNumber\":9}},"
+                "{\"node\":{\"_id\":\"e1\",\"title\":\"Pilot\",\"auth\":false,\"seasonNumber\":1,\"episodeNumber\":1,\"poster\":\"https://i.as.example/p.jpg\"}}]}}}}");
+        return reply(out, "{\"data\":{\"getShowBySlug\":null}}");
+    }
+    if (strstr(url, "adultswim.com/api/shows/v1/videos/e1"))
+        return reply(out, "{\"data\":{\"video\":{\"stream\":{\"assets\":["
+            "{\"url\":\"https://cdn.as.example/e1/stream.vtt\",\"mime_type\":\"text/vtt\"},"
+            "{\"url\":\"https://cdn.as.example/e1/master.m3u8\",\"mime_type\":\"application/x-mpegURL\"}]}}}}");
+    if (strstr(url, "adultswim.com/api/shows/v1/videos/e2")) { if (status) *status = 403; return reply(out, "{}"); }
+    return NET_ERR;
+}
+
 /* --- simulierte Pluto-TV-API --- */
 static int pluto_boots;
 static int pluto_reply(const char *url, const char *hdr, NetBuf *out, long *status) {
@@ -145,6 +179,7 @@ static int pluto_reply(const char *url, const char *hdr, NetBuf *out, long *stat
 }
 
 /* --- simulierte YouTube-InnerTube-API --- */
+static int yt_player_calls;
 static int yt_reply(const char *url, const char *post, const char *hdr, NetBuf *out) {
     snprintf(last_post, sizeof last_post, "%s", post ? post : "");
     if (strstr(url, "/youtubei/v1/guide"))
@@ -182,8 +217,25 @@ static int yt_reply(const char *url, const char *post, const char *hdr, NetBuf *
             return reply(out, "{\"contents\":[{\"richItemRenderer\":{\"content\":{\"videoRenderer\":{\"videoId\":\"cv1\",\"title\":{\"runs\":[{\"text\":\"Neuestes Video\"}]},"
                 "\"publishedTimeText\":{\"simpleText\":\"vor 2 Tagen\"}}}}}]}");
     }
+    if (strstr(url, "youtubei.googleapis.com/youtubei/v1/player")) {      /* Android-Client */
+        if (!hdr || !strstr(hdr, "X-Youtube-Client-Name: 3") || !post || !strstr(post, "\"ANDROID\""))
+            return reply(out, "{\"playabilityStatus\":{\"status\":\"ERROR\",\"reason\":\"falscher Client\"}}");
+        if (strstr(post, "\"vidbot\""))
+            return reply(out, "{\"playabilityStatus\":{\"status\":\"LOGIN_REQUIRED\",\"reason\":\"Sign in to confirm you're not a bot\"}}");
+        return reply(out, "{\"playabilityStatus\":{\"status\":\"OK\"},\"streamingData\":{\"formats\":["
+            "{\"itag\":18,\"url\":\"https://rr.googlevideo.example/360.mp4\",\"mimeType\":\"video/mp4; codecs=\\\"avc1.42001E, mp4a.40.2\\\"\",\"height\":360},"
+            "{\"itag\":99,\"signatureCipher\":\"s=x\",\"mimeType\":\"video/mp4; codecs=\\\"avc1\\\"\",\"height\":720},"
+            "{\"itag\":43,\"url\":\"https://rr.googlevideo.example/vp8.webm\",\"mimeType\":\"video/webm; codecs=\\\"vp8\\\"\",\"height\":360}]}}");
+    }
     if (strstr(url, "/youtubei/v1/player")) {
-        if (!hdr || !strstr(hdr, "X-Youtube-Client-Name: 101") || !strstr(hdr, "X-Goog-Visitor-Id: VISITOR123"))
+        yt_player_calls++;
+        if (post && (strstr(post, "\"vidmp4\"") || strstr(post, "\"vidbot\""))) {
+            /* erste Abweisung liefert neue Besucher-ID */
+            if (hdr && strstr(hdr, "X-Goog-Visitor-Id: VISITOR456"))
+                return reply(out, "{\"playabilityStatus\":{\"status\":\"UNPLAYABLE\",\"reason\":\"Nicht auf diesem Geraet\"}}");
+            return reply(out, "{\"responseContext\":{\"visitorData\":\"VISITOR456\"},\"playabilityStatus\":{\"status\":\"LOGIN_REQUIRED\"}}");
+        }
+        if (!hdr || !strstr(hdr, "X-Youtube-Client-Name: 101") || !strstr(hdr, "X-Goog-Visitor-Id: VISITOR"))
             return reply(out, "{\"playabilityStatus\":{\"status\":\"ERROR\",\"reason\":\"falscher Client\"}}");
         if (post && strstr(post, "\"altersfrei\""))
             return reply(out, "{\"playabilityStatus\":{\"status\":\"LOGIN_REQUIRED\",\"reason\":\"Melde dich an\"}}");
@@ -228,8 +280,9 @@ int net_request(const char *url, const char *post, const char *hdr, NetBuf *out,
     if (final_url) snprintf(final_url, fl, "%s", url);
     snprintf(last_headers, sizeof last_headers, "%s", hdr ? hdr : "");
     if (net_check_url(url) == NET_BLOCKED) return NET_BLOCKED;
-    if (strstr(url, "youtube.com/youtubei/")) return yt_reply(url, post, hdr, out);
+    if (strstr(url, "youtube.com/youtubei/") || strstr(url, "youtubei.googleapis.com")) return yt_reply(url, post, hdr, out);
     if (strstr(url, "pluto.tv")) return pluto_reply(url, hdr, out, status);
+    if (strstr(url, "adultswim.com")) return as_reply(url, post, out, status);
     if (strstr(url, "radio-browser.info") || strstr(url, "itunes.apple.com") || strstr(url, "applemarketingtools") || strstr(url, "feed.example"))
         return audio_reply(url, out, status);
     if (strstr(url, "archive.org/advancedsearch.php")) {
@@ -355,6 +408,7 @@ static int resolve(int src, PluginItem *it, StreamInfo *si) {
     plugins_take_stream(si);
     return 0;
 }
+static int source_save_ref(int src) { Source *s = plugins_source(src); return s ? s->save_ref : -1; }
 static int find_item(PluginList *l, const char *title) {
     for (int i = 0; i < l->count; i++) if (strstr(l->items[i].title, title)) return i;
     return -1;
@@ -583,15 +637,34 @@ int main(void) {
 
     /* ---------- Jellyfin ---------- */
     int jf = find_src("Jellyfin"); CHECK(jf >= 0);
-    /* ohne Zugangsdaten: Einrichtungshinweis */
-    CHECK(browse(jf, NULL, &l) == 0 && l.count == 4 && find_item(&l, "Noch nicht eingerichtet") == 0 && l.items[3].kind == ITEM_SEARCH);
+    /* ohne Anmeldung: Schritt 1 (Server) */
+    CHECK(browse(jf, NULL, &l) == 0 && l.count == 1 && l.items[0].kind == ITEM_SEARCH && !strcmp(l.items[0].id, "login_server"));
     plugins_list_free(&l);
-    /* falsche Zugangsdaten */
-    CHECK(search_ctx(jf, "http://jelly.example | max | falsch", "login", &l) < 0);
-    /* Anmeldung ueber Suchkontext */
-    CHECK(search_ctx(jf, "http://jelly.example | max | geheim", "login", &l) == 0);
+    /* Schritt 1: Server ohne Port -> Standard-Port 8096 wird gefunden */
+    CHECK(search_ctx(jf, "jelly.example", "login_server", &l) == 0 && l.count == 2);
+    CHECK(strstr(l.items[0].title, "Heimkino") && !strcmp(l.items[1].id, "login_user:http://jelly.example:8096"));
+    plugins_list_free(&l);
+    CHECK(search_ctx(jf, "kein-server.example", "login_server", &l) < 0);
+    /* Schritt 2: Benutzer, Schritt 3: Passwort */
+    CHECK(search_ctx(jf, "max", "login_user:http://jelly.example:8096", &l) == 0 && l.count == 2 &&
+          !strcmp(l.items[1].id, "login_pass:http://jelly.example:8096|max"));
+    plugins_list_free(&l);
+    CHECK(search_ctx(jf, "falsch", "login_pass:http://jelly.example:8096|max", &l) < 0);
+    CHECK(search_ctx(jf, "geheim", "login_pass:http://jelly.example:8096|max", &l) == 0);
     CHECK(strstr(last_post, "\"Username\":\"max\"") && strstr(last_post, "\"Pw\":\"geheim\""));
     CHECK(find_item(&l, "Filme") >= 0 && find_item(&l, "Serien") >= 0 && find_item(&l, "Suchen") >= 0);
+    /* Passwort nirgends gespeichert, Token nur verschluesselt */
+    {
+        char cmd[512];
+        snprintf(cmd, sizeof cmd, "grep -rl -e geheim -e TOK123 '%s' > jf_grep.txt 2>/dev/null", VS_DATA_DIR);
+        if (system(cmd)) {}
+        FILE *g = fopen("jf_grep.txt", "r");
+        char hits[512] = ""; if (g) { if (!fread(hits, 1, sizeof hits - 1, g)) hits[0] = 0; fclose(g); }
+        printf("  Dateien mit Passwort/Token im Klartext: %s\n", hits[0] ? hits : "keine");
+        CHECK(hits[0] == 0);
+        FILE *e = fopen(VS_DATA_DIR "/.secure/jellyfin.bin", "r");
+        CHECK(e != NULL); if (e) fclose(e);
+    }
     char lib_tv[64] = "", lib_mov[64] = "";
     for (int i = 0; i < l.count; i++) {
         if (!strcmp(l.items[i].title, "Serien")) snprintf(lib_tv, sizeof lib_tv, "%s", l.items[i].id);
@@ -608,19 +681,31 @@ int main(void) {
     plugins_list_free(&l);
     CHECK(browse(jf, sea, &l) == 0 && l.count == 2 && !strcmp(l.items[0].title, "1. Pilot") && !strcmp(l.items[1].title, "2. Zweite"));
     CHECK(l.items[0].kind == ITEM_VIDEO);
-    /* Folge (1080p h264) -> Transkodierung erzwungen */
-    CHECK(resolve(jf, &l.items[0], &si) == 0 && strstr(si.url, "/Videos/ep1/master.m3u8") && strstr(si.url, "VideoCodec=h264") && strstr(si.url, "MaxHeight=720"));
+    /* Folge: Server wandelt um (TranscodingUrl) */
+    CHECK(resolve(jf, &l.items[0], &si) == 0 && !strcmp(si.url, "http://jelly.example:8096/videos/x/master.m3u8?DeviceId=d&MediaSourceId=src2&VideoCodec=h264&api_key=TOK123"));
+    CHECK(strstr(jelly_pb_post, "\"VideoBitDepth\"") && strstr(jelly_pb_post, "mp4,m4v,mov") && strstr(jelly_pb_post, "\"Protocol\":\"hls\""));
     plugins_list_free(&l);
     /* Filme: direktes Abspielen (h264/720p) vs. Transkodierung (hevc/1080p) */
     CHECK(browse(jf, lib_mov, &l) == 0 && l.count == 2);
     int im1 = find_item(&l, "Film H264"), im2 = find_item(&l, "Film HEVC");
     CHECK(im1 >= 0 && im2 >= 0);
-    CHECK(resolve(jf, &l.items[im1], &si) == 0 && strstr(si.url, "/Videos/mov1/stream") && strstr(si.url, "static=true"));
+    CHECK(resolve(jf, &l.items[im1], &si) == 0 && strstr(si.url, "/Videos/mov1/stream?static=true") && strstr(si.url, "playSessionId=ps1"));
+    CHECK(si.nsubs == 1 && !strcmp(si.sub_url[0], "http://jelly.example:8096/Videos/mov1/mov1/Subtitles/3/0/Stream.vtt?api_key=TOK123"));
     CHECK(resolve(jf, &l.items[im2], &si) == 0 && strstr(si.url, "master.m3u8") && strstr(si.url, "MediaSourceId=src2"));
     plugins_list_free(&l);
     /* Suche auf dem Server */
     CHECK(search(jf, "hevc", &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Film HEVC"));
     plugins_list_free(&l);
+    /* Plugins neu laden: Sitzung bleibt (verschluesselt) erhalten */
+    CHECK(plugins_reload() == n);
+    jf = find_src("Jellyfin");
+    CHECK(browse(jf, NULL, &l) == 0 && find_item(&l, "Filme") >= 0);
+    plugins_list_free(&l);
+    /* Abmelden: Server informiert, Token weg, Vorschlag mit Benutzername bleibt */
+    CHECK(browse(jf, "logout", &l) == 0 && jelly_logouts == 1);
+    CHECK(find_item(&l, "Als max anmelden") >= 0);
+    plugins_list_free(&l);
+    { FILE *e = fopen(VS_DATA_DIR "/.secure/jellyfin.bin", "r"); CHECK(e == NULL); if (e) fclose(e); }
 
     /* ---------- Website-Explorer ---------- */
     int ex = find_src("Explorer"); CHECK(ex >= 0);
@@ -689,6 +774,25 @@ int main(void) {
     plugins_list_free(&l);
     CHECK(browse(yt, "pl:PLstaffel1", &l) == 0 && l.count == 2 && !strcmp(l.items[0].title, "1. Pika!") && !strcmp(l.items[1].title, "2. Glurak"));
     plugins_list_free(&l);
+    /* Stream-Ersatz: visionOS weist ab (mit neuer Besucher-ID -> 1 Wiederholung), Android liefert MP4 */
+    CHECK(source_save_ref(yt) == 1);
+    yt_player_calls = 0;
+    plugins_start_resolve_id(yt, "v:vidmp4", "Test");
+    CHECK(wait_job() == JOB_DONE);
+    plugins_take_stream(&si);
+    printf("  YouTube-Ersatz: %s (visionOS-Versuche: %d)\n", si.url, yt_player_calls);
+    CHECK(!strcmp(si.url, "https://rr.googlevideo.example/360.mp4") && strstr(si.headers, "com.google.android.youtube") && yt_player_calls == 2);
+    plugins_start_resolve_id(yt, "v:vidbot", "Bot");
+    CHECK(wait_job() == JOB_ERROR);
+    printf("  YouTube-Abweisung: %s\n", plugins_job_error());
+    CHECK(strstr(plugins_job_error(), "not a bot") && strstr(plugins_job_error(), "Anmeldung"));
+    plugins_job_reset();
+    /* gespeicherter Verweis: nur mit id aufloesbar */
+    CHECK(plugins_find_source("youtube.lua") == yt);
+    plugins_start_resolve_id(yt, "v:vid1", "Verweis");
+    CHECK(wait_job() == JOB_DONE);
+    plugins_take_stream(&si);
+    CHECK(strstr(si.url, "manifest.googlevideo.com") != NULL);
     /* Handle nicht aufloesbar -> Suche nach dem Namen */
     CHECK(browse(yt, lgid, &l) == 0 && find_item(&l, "Pokemon Folge 1") >= 0);
     plugins_list_free(&l);
@@ -744,6 +848,36 @@ int main(void) {
     plugins_list_free(&l);
     CHECK(browse(au, "podcharts", &l) == 0 && l.count == 2 && !strcmp(l.items[0].title, "Hit 1"));   /* Reihenfolge der Charts */
     plugins_list_free(&l);
+
+    /* ---------- Downloads ---------- */
+    int dlsrc = find_src("Downloads"); CHECK(dlsrc >= 0);
+    CHECK(browse(dlsrc, NULL, &l) < 0);                         /* leer */
+    mkdir(VS_DATA_DIR "/downloads", 0777);
+    { FILE *df = fopen(VS_DATA_DIR "/downloads/Mein_Film.mp4", "w"); if (df) { fputs("x", df); fclose(df); } }
+    { FILE *df = fopen(VS_DATA_DIR "/downloads/halb.mp4.part", "w"); if (df) fclose(df); }
+    CHECK(browse(dlsrc, NULL, &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Mein Film"));
+    if (l.count == 1) {
+        CHECK(resolve(dlsrc, &l.items[0], &si) == 0 && !strcmp(si.url, VS_DATA_DIR "/downloads/Mein_Film.mp4"));
+        plugins_start_action(dlsrc, &l.items[0], "del", NULL);
+        CHECK(wait_job() == JOB_DONE); { char m[256]; int r; plugins_take_action_result(m, sizeof m, &r); }
+        struct stat dst; CHECK(stat(VS_DATA_DIR "/downloads/Mein_Film.mp4", &dst) != 0);
+    }
+    plugins_list_free(&l);
+
+    /* ---------- Adult Swim ---------- */
+    int as = find_src("Adult Swim"); CHECK(as >= 0);
+    CHECK(browse(as, NULL, &l) == 0 && l.count > 10 && l.items[0].kind == ITEM_SEARCH);
+    plugins_list_free(&l);
+    CHECK(search(as, "Rick & Morty", &l) == 0 && strstr(last_post, "rick-and-morty"));   /* Name -> Slug */
+    if (l.count == 3) {
+        CHECK(strstr(l.items[0].title, "S01E01") && strstr(l.items[0].title, "Pilot") && strstr(l.items[1].title, "S01E02"));
+        CHECK(strstr(l.items[2].subtitle, "US-TV-Anbieter"));                               /* gesperrt ans Ende */
+        CHECK(resolve(as, &l.items[0], &si) == 0 && !strcmp(si.url, "https://cdn.as.example/e1/master.m3u8") && si.nsubs == 1);
+        plugins_start_resolve(as, &l.items[1]); CHECK(wait_job() == JOB_ERROR); printf("  Adult Swim gesperrt: %s\n", plugins_job_error()); plugins_job_reset();
+        plugins_start_resolve(as, &l.items[2]); CHECK(wait_job() == JOB_ERROR); plugins_job_reset();
+    } else CHECK(l.count == 3);
+    plugins_list_free(&l);
+    CHECK(search(as, "gibt es nicht", &l) < 0);
 
     CHECK(plugins_reload() == n);
     plugins_shutdown();

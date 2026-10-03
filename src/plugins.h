@@ -43,6 +43,7 @@ typedef struct {
     int  ref;          /* Registry-Referenz auf die Quellentabelle */
     int  has_search;
     int  has_browse;
+    int  save_ref;     /* Streams laufen ab: beim Speichern Verweis statt Stream-URL ablegen */
 } Source;
 
 #define MAX_STREAM_SUBS 4
@@ -61,6 +62,9 @@ int     plugins_reload(void);
 
 int     plugins_source_count(void);
 Source *plugins_source(int idx);
+int     plugins_find_source(const char *file);          /* Index der Quelle zu "youtube.lua" oder -1 */
+/* Eintrag nur anhand seiner id auflösen (gespeicherte Verweise "vsplugin://datei/id") */
+int     plugins_start_resolve_id(int src, const char *id, const char *title);
 
 void    plugins_list_free(PluginList *l);
 /* Hängt src an dst an (src ist danach leer); entfernt vorher dst->items[remove_index] (-1 = nichts) */

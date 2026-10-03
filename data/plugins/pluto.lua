@@ -16,6 +16,9 @@ local API = "https://api.pluto.tv"
 local IMAGES = "https://images.pluto.tv"
 local STITCHER_FALLBACK = "https://cfd-v4-service-channel-stitcher-use1-1.prd.pluto.tv"
 local CAT_PAGE = 25      -- Kategorien pro Abruf (jede mit bis zu 100 Titeln)
+-- Pluto lehnt Anfragen ohne Browser-Kennung ab (HTTP 401) - wie die Web-App auftreten
+local UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+local WEB_HDR = "User-Agent: " .. UA .. "\nOrigin: https://pluto.tv\nReferer: https://pluto.tv/\nAccept: application/json"
 
 -- ---------------------------------------------------------------- Hilfen
 
@@ -43,14 +46,17 @@ local session = nil
 local function boot()
   local dev = device_id()
   local params = {
-    { "appName", "web" }, { "appVersion", "9.1.0" }, { "deviceType", "web" }, { "deviceModel", "web" },
+    { "appName", "web" }, { "appVersion", "8.0.0-111b2b9dc00bd0bea9030b30662159ed9e7c8bc6" }, { "deviceType", "web" }, { "deviceModel", "web" },
     { "deviceMake", "chrome" }, { "deviceVersion", "122.0.0" }, { "deviceId", dev }, { "clientID", dev },
-    { "clientModelNumber", "1.0.0" }, { "serverSideAds", "false" },
+    { "clientModelNumber", "1.0.0" }, { "serverSideAds", "false" }, { "blockingMode", "" },
   }
-  local body, status = vs.http_get(BOOT .. "?" .. query(params), "Accept: application/json")
+  local body, status = vs.http_get(BOOT .. "?" .. query(params), WEB_HDR)
   if not body then return nil, "Pluto nicht erreichbar: " .. tostring(status) end
   local ok, j = pcall(json.decode, body)
   if not ok or type(j) ~= "table" or not j.sessionToken then
+    if status == 401 or status == 403 then
+      return nil, "Pluto verweigert die Anmeldung (HTTP " .. status .. ") - evtl. in deiner Region nicht verfuegbar oder Proxy/VPN erkannt"
+    end
     return nil, "Pluto: keine Sitzung (HTTP " .. tostring(status) .. ")"
   end
   local sp = j.stitcherParams or ""
@@ -68,7 +74,7 @@ local function api(path, params)
       if not s then return nil, err end
     end
     local url = API .. path .. (params and ("?" .. query(params)) or "")
-    local body, status = vs.http_get(url, "Accept: application/json\nAuthorization: Bearer " .. session.token)
+    local body, status = vs.http_get(url, WEB_HDR .. "\nAuthorization: Bearer " .. session.token)
     if body and status ~= 401 and status ~= 403 then
       if status and status >= 400 then return nil, "Pluto antwortete HTTP " .. status end
       local ok, j = pcall(json.decode, body)
@@ -209,6 +215,7 @@ local genre_cache = {}
 
 return {
   name = "Pluto TV (auf Abruf)",
+  save_ref = true,   -- Stream-Adressen laufen ab: in Playlists Verweis speichern
   description = "Kostenlose Filme & Serien, werbefinanziert - Live-Sender im Sender-Finder",
 
   browse = function(id)
@@ -303,7 +310,8 @@ return {
     p = p:gsub("^https?://[^/]+", ""):gsub("%?.*$", "")
     if p:sub(1, 1) ~= "/" then p = "/" .. p end
     p = p:gsub("^/v%d+/", "/")
-    return s.stitcher .. "/v2" .. p .. "?" .. s.params .. "&jwt=" .. enc(s.token) ..
-           "&masterJWTPassthrough=true&includeExtendedEvents=true"
+    return { url = s.stitcher .. "/v2" .. p .. "?" .. s.params .. "&jwt=" .. enc(s.token) ..
+                   "&masterJWTPassthrough=true&includeExtendedEvents=true",
+             headers = { ["User-Agent"] = UA, Origin = "https://pluto.tv", Referer = "https://pluto.tv/" } }
   end,
 }

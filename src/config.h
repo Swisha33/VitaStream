@@ -4,7 +4,7 @@
 #define VS_DATA_DIR    "ux0:data/VitaStream"
 #define VS_APP_DATA    "app0:data"
 #define VS_CONFIG_FILE VS_DATA_DIR "/config.ini"
-#define VS_APP_VERSION "0.7"
+#define VS_APP_VERSION "0.8"
 
 typedef struct {
     int  adblock_enabled;     /* lokale Blockliste aktiv */
@@ -17,6 +17,8 @@ typedef struct {
     char proxy[192];          /* z. B. socks5h://host:1080, leer = kein Proxy */
     char audio_lang[48];      /* bevorzugte Tonspur (z. B. "en"), leer = automatisch (Deutsch) */
     int  theme;               /* Farbthema der Oberfläche (ui_theme_*) */
+    char custom_colors[64];   /* eigenes Thema: 6x RRGGBB, durch Komma getrennt */
+    char menu_music[256];     /* Menümusik: Datei in ux0:data/VitaStream/music/, leer = aus */
 } VsConfig;
 
 extern VsConfig g_cfg;

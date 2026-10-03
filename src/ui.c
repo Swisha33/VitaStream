@@ -30,15 +30,31 @@ static const Theme s_themes[] = {
 };
 #define NTHEMES (int)(sizeof s_themes / sizeof *s_themes)
 static int s_theme;
+/* eigenes Thema (Themen-Editor): letzter Eintrag der Liste */
+static Theme s_custom = { "Eigenes Thema", 0xFF1E1A16, 0xFF2C2620, 0xFF6A4A2A, 0xFF33B5FF, 0xFFF0F0F0, 0xFF9A9A9A };
 
-int ui_theme_count(void) { return NTHEMES; }
-const char *ui_theme_name(int i) { return (i >= 0 && i < NTHEMES) ? s_themes[i].name : "?"; }
+int ui_theme_count(void) { return NTHEMES + 1; }
+const char *ui_theme_name(int i) { return (i >= 0 && i < NTHEMES) ? s_themes[i].name : (i == NTHEMES ? s_custom.name : "?"); }
+int ui_theme_custom_index(void) { return NTHEMES; }
+
+void ui_get_custom(uint32_t c[6])
+{
+    c[0] = s_custom.bg; c[1] = s_custom.panel; c[2] = s_custom.sel;
+    c[3] = s_custom.accent; c[4] = s_custom.text; c[5] = s_custom.dim;
+}
+
+void ui_set_custom(const uint32_t c[6])
+{
+    s_custom.bg = c[0]; s_custom.panel = c[1]; s_custom.sel = c[2];
+    s_custom.accent = c[3]; s_custom.text = c[4]; s_custom.dim = c[5];
+    if (s_theme == NTHEMES) ui_set_theme(NTHEMES);
+}
 
 void ui_set_theme(int i)
 {
-    if (i < 0 || i >= NTHEMES) i = 0;
+    if (i < 0 || i > NTHEMES) i = 0;
     s_theme = i;
-    const Theme *t = &s_themes[i];
+    const Theme *t = i == NTHEMES ? &s_custom : &s_themes[i];
     COL_BG = t->bg; COL_PANEL = t->panel; COL_SEL = t->sel; COL_ACCENT = t->accent;
     COL_TEXT = t->text; COL_DIM = t->dim;
     COL_OK = 0xFF66CC66;
@@ -151,8 +167,16 @@ void ui_header(const char *title, const char *right)
     if (right) ui_text(SCREEN_W - 18 - ui_text_width(right), 32, COL_DIM, right);
 }
 
+static char s_status[256];
+void ui_set_status(const char *s) { snprintf(s_status, sizeof s_status, "%s", s ? s : ""); }
+
 void ui_footer(const char *hints)
 {
+    if (s_status[0]) {
+        /* Statuszeile (Download, Hintergrundwiedergabe) über der Fußzeile */
+        ui_rect(0, SCREEN_H - 60, SCREEN_W, 26, 0xE0000000);
+        ui_text_clipped(18, SCREEN_H - 41, SCREEN_W - 36, COL_ACCENT, s_status);
+    }
     ui_rect(0, SCREEN_H - 34, SCREEN_W, 34, COL_PANEL);
     ui_text_scaled(18, SCREEN_H - 11, COL_DIM, 0.85f, hints);
 }
@@ -266,6 +290,16 @@ void ui_list_thumbs(int count, int cursor, int *scroll, ListThumbFn fn, void *ct
             int gw = vita2d_pgf_text_width(s_font, 0.7f, g);
             vita2d_pgf_draw_text(s_font, bx + (THUMB_W - gw) / 2, by + THUMB_H - 3, 0xFFFFFFFF, 0.7f, g);
         }
+        if ((flags & LIST_FLAG_STARTED) && !(flags & LIST_FLAG_WATCHED)) {
+            /* angefangen: Band + Fortschrittsbalken */
+            int pct = (flags >> 8) & 0xFF;
+            ui_rect(bx, by + THUMB_H - 20, THUMB_W, 16, 0xD02060C0);
+            const char *g = "Angefangen";
+            int gw = vita2d_pgf_text_width(s_font, 0.7f, g);
+            vita2d_pgf_draw_text(s_font, bx + (THUMB_W - gw) / 2, by + THUMB_H - 7, 0xFFFFFFFF, 0.7f, g);
+            ui_rect(bx, by + THUMB_H - 4, THUMB_W, 4, 0xC0303030);
+            ui_rect(bx, by + THUMB_H - 4, THUMB_W * pct / 100, 4, 0xFF20A0FF);
+        }
         uint32_t tcol = (flags & LIST_FLAG_WATCHED) ? COL_DIM : COL_TEXT;
 
         int tx = bx + THUMB_W + 14, tmax = SCREEN_W - tx - 30;
@@ -357,7 +391,8 @@ int ui_input_text(const char *title, const char *initial, char *out, int outlen)
 {
     static uint16_t t16[128], init16[512], buf16[SCE_IME_DIALOG_MAX_TEXT_LENGTH + 1];
     utf8_to_utf16(title, t16, 128);
-    utf8_to_utf16(initial ? initial : "", init16, 512);
+    int is_secret = title && (strstr(title, "Passwort") || strstr(title, "passwort") || strstr(title, "Password"));
+    utf8_to_utf16((initial && !is_secret) ? initial : "", init16, 512);
     memset(buf16, 0, sizeof buf16);
 
     SceImeDialogParam p;
@@ -366,7 +401,9 @@ int ui_input_text(const char *title, const char *initial, char *out, int outlen)
     p.languagesForced    = SCE_FALSE;
     p.type               = SCE_IME_TYPE_DEFAULT;
     p.option             = 0;
-    p.textBoxMode        = SCE_IME_DIALOG_TEXTBOX_MODE_DEFAULT;
+    /* Passwortfelder verdeckt eingeben */
+    int secret = title && (strstr(title, "Passwort") || strstr(title, "passwort") || strstr(title, "Password"));
+    p.textBoxMode        = secret ? SCE_IME_DIALOG_TEXTBOX_MODE_PASSWORD : SCE_IME_DIALOG_TEXTBOX_MODE_DEFAULT;
     p.title              = t16;
     p.maxTextLength      = 500;
     p.initialText        = init16;

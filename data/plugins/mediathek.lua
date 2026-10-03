@@ -250,9 +250,10 @@ local IA_CATS = {
 
 local function ia_list(query_expr, lang_expr, page)
   local q = query_expr .. " AND " .. lang_expr
-  local url = IA_SEARCH .. "?q=" .. enc(q)
-           .. "&fl[]=identifier&fl[]=title&fl[]=year&fl[]=language"
-           .. "&sort[]=downloads+desc&rows=" .. IA_PAGE .. "&page=" .. (page + 1) .. "&output=json"
+  -- vollstaendig kodieren (Leerzeichen, Klammern, Anfuehrungszeichen) - sonst lehnt curl die URL ab
+  local url = IA_SEARCH .. "?q=" .. vs.urlencode(q)
+           .. "&fl%5B%5D=identifier&fl%5B%5D=title&fl%5B%5D=year"
+           .. "&sort%5B%5D=downloads%20desc&rows=" .. IA_PAGE .. "&page=" .. (page + 1) .. "&output=json"
   local body, status = vs.http_get(url)
   if not body then return nil, "Internet Archive nicht erreichbar (" .. tostring(status) .. ")" end
   local ok, data = pcall(json.decode, body)
@@ -301,7 +302,7 @@ local function ia_resolve(identifier)
     end
   end
   if not best then return nil, "Internet Archive: keine abspielbare MP4-Datei (evtl. nur andere Formate)" end
-  return "https://archive.org/download/" .. identifier .. "/" .. (enc(best):gsub("%%2F", "/"))
+  return "https://archive.org/download/" .. identifier .. "/" .. (vs.urlencode(best):gsub("%%2F", "/"))
 end
 
 local function ia_search(lang, text, page)

@@ -9,7 +9,7 @@ local json = require("json")
 
 local RADIO_SERVERS = { "https://de1.api.radio-browser.info", "https://fi1.api.radio-browser.info",
                         "https://at1.api.radio-browser.info" }
-local UA = "User-Agent: VitaStream/0.7 (PS Vita homebrew)"
+local UA = "User-Agent: VitaStream/0.8 (PS Vita homebrew)"
 local PLAYABLE = { MP3 = true, AAC = true, ["AAC+"] = true, MPEG = true, HLS = true }
 local RADIO_PAGE = 60
 

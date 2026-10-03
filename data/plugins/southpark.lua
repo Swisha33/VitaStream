@@ -159,6 +159,7 @@ end
 
 return {
   name = "South Park",
+  save_ref = true,   -- Stream-Adressen laufen ab: in Playlists Verweis speichern
   description = "Alle Staffeln kostenlos von southpark.de (Deutsch/Englisch)",
 
   browse = function(id)

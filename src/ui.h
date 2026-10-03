@@ -12,6 +12,11 @@ extern uint32_t COL_BG, COL_PANEL, COL_SEL, COL_ACCENT, COL_TEXT, COL_DIM, COL_O
 int         ui_theme_count(void);
 const char *ui_theme_name(int i);
 void        ui_set_theme(int i);
+/* Themen-Editor: eigenes Thema = Index ui_theme_custom_index(); Farben (ABGR):
+   Hintergrund, Flächen, Auswahl, Akzent, Text, Nebentext */
+int         ui_theme_custom_index(void);
+void        ui_get_custom(uint32_t c[6]);
+void        ui_set_custom(const uint32_t c[6]);
 
 /* Tasten (nach Region: Kreuz/Kreis vertauscht, falls nötig) */
 typedef struct {
@@ -36,6 +41,8 @@ void ui_rect(int x, int y, int w, int h, uint32_t col);
 
 void ui_header(const char *title, const char *right);
 void ui_footer(const char *hints);
+/* Statuszeile über der Fußzeile (z. B. Download-Fortschritt); "" = aus */
+void ui_set_status(const char *s);
 
 /* Zeichnet eine scrollende Liste; get_label liefert Titel/Untertitel für Index i. */
 typedef void (*ListLabelFn)(void *ctx, int i, const char **title, const char **sub);
@@ -43,6 +50,7 @@ void ui_list(int count, int cursor, int *scroll, ListLabelFn fn, void *ctx);
 
 /* Liste mit Vorschaubild links (thumb = URL oder NULL -> Platzhalter mit Initialen) */
 #define LIST_FLAG_WATCHED 1
+#define LIST_FLAG_STARTED 2          /* angefangen; Prozent in Bit 8-15: LIST_FLAG_STARTED | (pct << 8) */
 typedef void (*ListThumbFn)(void *ctx, int i, const char **title, const char **sub, const char **thumb, int *flags);
 void ui_list_thumbs(int count, int cursor, int *scroll, ListThumbFn fn, void *ctx);
 int  ui_list_thumbs_visible(void);

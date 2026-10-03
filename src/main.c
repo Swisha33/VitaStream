@@ -9,6 +9,8 @@
 #include <string.h>
 #include <strings.h>
 #include <ctype.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 #include <psp2/kernel/processmgr.h>
 #include <psp2/ctrl.h>
@@ -26,6 +28,8 @@
 #include "watched.h"
 #include "media.h"
 #include "sub.h"
+#include "history.h"
+#include "dl.h"
 
 int _newlib_heap_size_user = 192 * 1024 * 1024;
 
@@ -33,8 +37,8 @@ int _newlib_heap_size_user = 192 * 1024 * 1024;
 #define PLAYLIST_FILE  VS_DATA_DIR "/playlists.txt"
 #define MAX_DEPTH      16
 
-typedef enum { SCR_SOURCES, SCR_LIST, SCR_LOADING, SCR_PLAYER, SCR_SETTINGS } Screen;
-typedef enum { PEND_NONE, PEND_PUSH_LIST, PEND_PLAY, PEND_APPEND, PEND_SAVE, PEND_ACTION, PEND_REFRESH } Pending;
+typedef enum { SCR_SOURCES, SCR_LIST, SCR_LOADING, SCR_PLAYER, SCR_SETTINGS, SCR_HISTORY } Screen;
+typedef enum { PEND_NONE, PEND_PUSH_LIST, PEND_PLAY, PEND_APPEND, PEND_SAVE, PEND_ACTION, PEND_REFRESH, PEND_DOWNLOAD } Pending;
 
 typedef struct {
     PluginList list;
@@ -66,6 +70,15 @@ static int     zap_target = -1, zap_dir, zap_timer;   /* Senderwechsel: wartet a
 static StreamInfo cur_si;               /* aktueller Stream (für Spurwechsel/Untertitel) */
 static int64_t resume_ms;               /* nach Neuöffnen hierhin springen (Tonspurwechsel) */
 static int     osd_timer;               /* Einblendung im Player (Frames) */
+static int     ref_hops;                /* Schutz vor Verweis-Schleifen (vsplugin://) */
+static HistEntry cur_hist;              /* Verlaufseintrag des laufenden Videos */
+static int     from_history;            /* Wiedergabe aus "Zuletzt gesehen" gestartet */
+static int64_t pending_resume;          /* Startposition für den nächsten Stream */
+static int     progress_timer;
+static int     hist_cursor, hist_scroll;
+static char    dl_title[128];
+static int     bg_active;               /* Ton läuft im Hintergrund weiter, während man stöbert */
+static int     bgm_active, bgm_fails;   /* Menümusik */
 
 /* Speichern in eine Playlist: Einträge nacheinander auflösen */
 static struct {
@@ -73,6 +86,8 @@ static struct {
     int  *idx;
     int   n, pos, ok, fail;
 } save_job;
+
+static void fmt_time(uint64_t ms, char *out, int n);
 
 /* ---------------- DNS-Presets ---------------- */
 
@@ -180,11 +195,13 @@ static void search_in_current_titled(const char *prompt, const char *ctx)
     Source *s = plugins_source(cur_src);
     if (!s || !s->has_search) return;
     char q[512];
-    if (ui_input_text(prompt, last_query, q, sizeof q) && q[0]) {
-        snprintf(last_query, sizeof last_query, "%s", q);
+    int secret = strstr(prompt, "Passwort") || strstr(prompt, "passwort") || strstr(prompt, "Password");
+    if (ui_input_text(prompt, secret ? "" : last_query, q, sizeof q) && q[0]) {
+        if (!secret) snprintf(last_query, sizeof last_query, "%s", q);   /* Passwörter nie merken */
         char t[160];
-        snprintf(t, sizeof t, "Suche: %s", q);
+        snprintf(t, sizeof t, "%s: %s", secret ? "Anmeldung" : "Suche", secret ? "..." : q);
         start_search(q, ctx, t);
+        if (secret) memset(q, 0, sizeof q);
     }
 }
 
@@ -246,32 +263,181 @@ static void label_items(void *ctx, int i, const char **t, const char **sub, cons
     }
     *sub = it->subtitle;
     *thumb = it->thumb;
-    *flags = (it->kind == ITEM_VIDEO && watched_get(item_key(it))) ? LIST_FLAG_WATCHED : 0;
+    *flags = 0;
+    if (it->kind == ITEM_VIDEO) {
+        const char *k = item_key(it);
+        if (watched_get(k)) *flags = LIST_FLAG_WATCHED;
+        else { int pct = progress_percent(k); if (pct) *flags = LIST_FLAG_STARTED | (pct << 8); }
+    }
 }
 
+/* Startseite: Zeile 0 = "Zuletzt gesehen", danach die Quellen */
 static void label_sources_thumb(void *ctx, int i, const char **t, const char **sub, const char **thumb, int *flags)
 {
-    label_sources(ctx, i, t, sub);
-    *thumb = NULL;
     *flags = 0;
+    *thumb = NULL;
+    if (i == 0) {
+        static char sb[96];
+        int n = history_count();
+        snprintf(sb, sizeof sb, n ? "%d Eintraege - weiterschauen, wo du aufgehoert hast" : "Noch nichts angesehen", n);
+        *t = "Zuletzt gesehen";
+        *sub = sb;
+        const HistEntry *e = history_get(0);
+        if (e && e->thumb[0]) *thumb = e->thumb;
+        return;
+    }
+    label_sources(ctx, i - 1, t, sub);
+}
+
+static void label_history(void *ctx, int i, const char **t, const char **sub, const char **thumb, int *flags)
+{
+    (void)ctx;
+    static char sb[200];
+    const HistEntry *e = history_get(i);
+    *t = e->title;
+    *thumb = e->thumb[0] ? e->thumb : NULL;
+    *flags = 0;
+    int si = plugins_find_source(e->src);
+    Source *s = plugins_source(si);
+    int64_t pos, dur;
+    if (watched_get(e->key)) {
+        *flags = LIST_FLAG_WATCHED;
+        snprintf(sb, sizeof sb, "%s  |  gesehen", s ? s->name : e->src);
+    } else if (progress_get(e->key, &pos, &dur) && dur > 0) {
+        char a[32], b[32];
+        fmt_time((uint64_t)pos, a, sizeof a);
+        fmt_time((uint64_t)dur, b, sizeof b);
+        *flags = LIST_FLAG_STARTED | (progress_percent(e->key) << 8);
+        snprintf(sb, sizeof sb, "%s  |  bei %s von %s", s ? s->name : e->src, a, b);
+    } else {
+        snprintf(sb, sizeof sb, "%s", s ? s->name : e->src);
+    }
+    *sub = sb;
+}
+
+/* Angefangenes Video: weiterschauen oder von vorn? Setzt pending_resume. 0 = abgebrochen */
+static int ask_resume(const char *key)
+{
+    pending_resume = 0;
+    int64_t pos, dur;
+    if (!key || !progress_get(key, &pos, &dur) || pos < 15000 || (dur > 0 && pos > dur * 95 / 100)) return 1;
+    char a[32], b[32], o1[96];
+    fmt_time((uint64_t)pos, a, sizeof a);
+    fmt_time((uint64_t)dur, b, sizeof b);
+    snprintf(o1, sizeof o1, "Weiterschauen bei %s (von %s)", a, b);
+    const char *opts[] = { o1, "Von Anfang an" };
+    int c = ui_menu("Schon angefangen", opts, 2);
+    if (c < 0) return 0;
+    if (c == 0) pending_resume = pos;
+    return 1;
+}
+
+/* wohin nach der Wiedergabe */
+static int return_screen(void) { return from_history ? SCR_HISTORY : (depth ? SCR_LIST : SCR_SOURCES); }
+
+/* Fortschritt sichern (nicht bei Live/kurzen Clips, nicht wenn schon als gesehen markiert) */
+static void save_progress_now(void)
+{
+    if (!play_key[0] || play_marked) return;
+    uint64_t d = player_duration_ms(), p = player_position_ms();
+    if (d > 60000 && p > 15000 && p < d * 9 / 10) progress_set(play_key, (int64_t)p, (int64_t)d);
+}
+
+/* Gesehen-Markierung und Fortschritt (im Player und bei Hintergrundwiedergabe) */
+static void track_progress(void)
+{
+    uint64_t d = player_duration_ms(), p = player_position_ms();
+    if (!play_marked && play_key[0] && d > 60000 && p >= d * 9 / 10) {
+        watched_set(play_key, 1);
+        progress_clear(play_key);
+        play_marked = 1;
+    }
+    if (++progress_timer >= 300) { progress_timer = 0; save_progress_now(); }   /* ca. alle 5 s */
+}
+
+/* Hintergrundwiedergabe beenden (vor einem neuen Stream) */
+static void stop_bgm(void);
+static void stop_background(void)
+{
+    stop_bgm();
+    if (!bg_active) return;
+    save_progress_now();
+    player_close();
+    sub_close();
+    bg_active = 0;
 }
 
 /* Wiedergabe eines Eintrags der aktuellen Liste starten */
 static void start_play(int index)
 {
+    stop_background();
     Level *lv = &stack[depth - 1];
     if (index < 0 || index >= lv->list.count) return;
     PluginItem *it = &lv->list.items[index];
+    const char *k = item_key(it);
+    if (!ask_resume(k)) return;
     if (plugins_start_resolve(cur_src, it) != 0) return;
     play_index = index;
     lv->cursor = index;
-    const char *k = item_key(it);
+    from_history = 0;
     snprintf(play_key, sizeof play_key, "%s", k ? k : "");
+    /* Verlaufseintrag vorbereiten (Stream-Adresse kommt nach dem Auflösen dazu) */
+    {
+        Source *src = plugins_source(cur_src);
+        memset(&cur_hist, 0, sizeof cur_hist);
+        snprintf(cur_hist.src, sizeof cur_hist.src, "%s", src ? src->file : "");
+        snprintf(cur_hist.id, sizeof cur_hist.id, "%s", it->id ? it->id : "");
+        snprintf(cur_hist.key, sizeof cur_hist.key, "%s", play_key);
+        snprintf(cur_hist.title, sizeof cur_hist.title, "%s", it->title ? it->title : "");
+        snprintf(cur_hist.thumb, sizeof cur_hist.thumb, "%s", it->thumb ? it->thumb : "");
+        cur_hist.save_ref = src ? src->save_ref : 0;
+    }
     snprintf(play_title, sizeof play_title, "%s", it->title);
     play_marked = 0;
+    ref_hops = 0;
     zap_target = -1;
     zap_timer = 0;
     start_job_screen(PEND_PLAY, it->title);
+}
+
+/* Eintrag aus "Zuletzt gesehen" abspielen */
+static void play_history(int i)
+{
+    const HistEntry *e = history_get(i);
+    if (!e) return;
+    stop_background();
+    if (!ask_resume(e->key)) return;
+    cur_hist = *e;
+    from_history = 1;
+    play_index = -1;
+    snprintf(play_key, sizeof play_key, "%s", e->key);
+    snprintf(play_title, sizeof play_title, "%s", e->title);
+    play_marked = 0;
+    ref_hops = 0;
+    zap_target = -1;
+    zap_timer = 0;
+    int src = plugins_find_source(e->src);
+    if (e->save_ref || !e->url[0]) {
+        /* Stream läuft ab: über die Quelle neu auflösen */
+        if (src < 0) { ui_message("Zuletzt gesehen", "Die Quelle dieses Eintrags ist nicht mehr installiert."); return; }
+        if (plugins_start_resolve_id(src, e->id, e->title) == 0) start_job_screen(PEND_PLAY, e->title);
+        return;
+    }
+    memset(&cur_si, 0, sizeof cur_si);
+    snprintf(cur_si.url, sizeof cur_si.url, "%s", e->url);
+    snprintf(cur_si.headers, sizeof cur_si.headers, "%s", e->headers);
+    resume_ms = pending_resume;
+    pending_resume = 0;
+    sub_close();
+    media_set_audio_pref(g_cfg.audio_lang);
+    history_add(&cur_hist);
+    hist_cursor = 0;
+    if (player_open(cur_si.url, cur_si.headers) == 0) {
+        scr = SCR_PLAYER;
+        osd_timer = 180;
+    } else {
+        ui_message("Wiedergabe fehlgeschlagen", player_error());
+    }
 }
 
 /* nächsten/vorigen abspielbaren Eintrag der Liste suchen */
@@ -477,6 +643,45 @@ static void append_entry(const char *file, const PluginItem *it, const StreamInf
     fclose(f);
 }
 
+/* Verweis statt Stream-URL (für Quellen, deren Streams ablaufen): vsplugin://datei/id */
+static void append_ref(const char *file, const PluginItem *it, const char *plugin_file)
+{
+    char path[256];
+    snprintf(path, sizeof path, VS_DATA_DIR "/%s", file);
+    FILE *f = fopen(path, "a");
+    if (!f) return;
+    char title[256];
+    snprintf(title, sizeof title, "%s", it->title);
+    for (char *c = title; *c; c++) if (*c == ',' || *c == '\n') *c = ' ';
+    fprintf(f, "#EXTINF:-1 tvg-logo=\"%s\" group-title=\"VitaStream\",%s\nvsplugin://%s/",
+            it->thumb && strncmp(it->thumb, "og:", 3) ? it->thumb : "", title, plugin_file);
+    for (const unsigned char *p = (const unsigned char *)it->id; *p; p++) {
+        if (isalnum(*p) || strchr("-_.~:", *p)) fputc(*p, f);
+        else fprintf(f, "%%%02X", *p);
+    }
+    fputc('\n', f);
+    fclose(f);
+}
+
+/* vsplugin://datei/id zerlegen; 1 bei Erfolg */
+static int parse_ref(const char *url, char *file, int fl, char *id, int il)
+{
+    if (strncmp(url, "vsplugin://", 11)) return 0;
+    const char *p = url + 11, *slash = strchr(p, '/');
+    if (!slash || slash == p) return 0;
+    snprintf(file, fl, "%.*s", (int)(slash - p), p);
+    int j = 0;
+    for (const char *q = slash + 1; *q && j < il - 1; q++) {
+        if (*q == '%' && isxdigit((unsigned char)q[1]) && isxdigit((unsigned char)q[2])) {
+            char h[3] = { q[1], q[2], 0 };
+            id[j++] = (char)strtol(h, NULL, 16);
+            q += 2;
+        } else id[j++] = *q;
+    }
+    id[j] = 0;
+    return j > 0;
+}
+
 static void make_filename(const char *name, char *out, int n)
 {
     int j = 0;
@@ -537,8 +742,16 @@ static void start_save(int *idx, int n)
 static void start_save_next(void)
 {
     Level *lv = &stack[depth - 1];
+    Source *src = plugins_source(cur_src);
     while (save_job.pos < save_job.n) {
         PluginItem *it = &lv->list.items[save_job.idx[save_job.pos]];
+        if (src && src->save_ref && it->id && it->id[0]) {
+            /* Stream-Adressen dieser Quelle laufen ab: Verweis speichern, beim Abspielen neu auflösen */
+            append_ref(save_job.file, it, src->file);
+            save_job.ok++;
+            save_job.pos++;
+            continue;
+        }
         char t[96];
         snprintf(t, sizeof t, "Speichere %d/%d ...", save_job.pos + 1, save_job.n);
         if (plugins_start_resolve(cur_src, it) == 0) {
@@ -571,7 +784,7 @@ static void item_menu(void)
     PluginAction acts[8];
     int nacts = plugins_item_actions(cur_src, it, acts, 8);
     const char *opts[16];
-    int k = 0, a_fav = -1, a_pl = -1, a_all = -1, a_seen = -1, a_seen_all = -1, a_unseen_all = -1;
+    int k = 0, a_fav = -1, a_pl = -1, a_all = -1, a_seen = -1, a_seen_all = -1, a_unseen_all = -1, a_dl = -1;
     const char *key = item_key(it);
     int seen = it->kind == ITEM_VIDEO && watched_get(key);
     for (int i = 0; i < nacts; i++) opts[k++] = acts[i].label;
@@ -579,6 +792,7 @@ static void item_menu(void)
         a_seen = k; opts[k++] = seen ? "Als ungesehen markieren" : "Als gesehen markieren";
         a_fav = k; opts[k++] = "Zu Favoriten hinzufuegen";
         a_pl  = k; opts[k++] = "Zu Playlist hinzufuegen...";
+        a_dl  = k; opts[k++] = dl_active() ? "Laufenden Download abbrechen" : "Herunterladen";
     }
     a_seen_all = k;   opts[k++] = "Ganze Liste als gesehen markieren";
     a_unseen_all = k; opts[k++] = "Ganze Liste als ungesehen markieren";
@@ -600,6 +814,17 @@ static void item_menu(void)
         return;
     }
     if (c == a_seen) { watched_set(key, !seen); return; }
+    if (c == a_dl) {
+        if (dl_active()) { dl_cancel(); return; }
+        Source *src = plugins_source(cur_src);
+        if (src && !strcmp(src->file, "youtube.lua")) {
+            ui_message("Herunterladen", "YouTube erlaubt keine Downloads ausserhalb der eigenen App.");
+            return;
+        }
+        snprintf(dl_title, sizeof dl_title, "%s", it->title);
+        if (plugins_start_resolve(cur_src, it) == 0) start_job_screen(PEND_DOWNLOAD, "Download wird vorbereitet ...");
+        return;
+    }
     if (c == a_seen_all || c == a_unseen_all) {
         for (int i = 0; i < lv->list.count; i++)
             if (lv->list.items[i].kind == ITEM_VIDEO) watched_set(item_key(&lv->list.items[i]), c == a_seen_all);
@@ -620,8 +845,142 @@ static void item_menu(void)
     }
 }
 
+/* ---------------- Themen-Editor & Menümusik ---------------- */
+
+#define MUSIC_DIR VS_DATA_DIR "/music"
+
+static uint32_t rgb_to_abgr(unsigned rgb) { return 0xFF000000u | ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF); }
+static unsigned abgr_to_rgb(uint32_t c) { return ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF); }
+
+static void apply_custom_colors(void)
+{
+    uint32_t c[6];
+    ui_get_custom(c);
+    const char *p = g_cfg.custom_colors;
+    for (int i = 0; i < 6 && *p; i++) {
+        unsigned v;
+        if (sscanf(p, "%6x", &v) == 1) c[i] = rgb_to_abgr(v);
+        p = strchr(p, ',');
+        if (!p) break;
+        p++;
+    }
+    ui_set_custom(c);
+}
+
+static void save_custom_colors(const uint32_t c[6])
+{
+    snprintf(g_cfg.custom_colors, sizeof g_cfg.custom_colors, "%06X,%06X,%06X,%06X,%06X,%06X",
+             abgr_to_rgb(c[0]), abgr_to_rgb(c[1]), abgr_to_rgb(c[2]), abgr_to_rgb(c[3]), abgr_to_rgb(c[4]), abgr_to_rgb(c[5]));
+}
+
+static void theme_editor(void)
+{
+    static const char *slots[] = { "Hintergrund", "Flaechen (Kopf-/Fusszeile)", "Auswahl-Balken", "Akzentfarbe",
+                                   "Text", "Nebentext" };
+    static const struct { const char *name; unsigned rgb; } palette[] = {
+        { "Schwarz", 0x000000 }, { "Anthrazit", 0x1A1C22 }, { "Dunkelgrau", 0x2E2E33 }, { "Grau", 0x6C6C70 },
+        { "Hellgrau", 0xB4B4B8 }, { "Weiss", 0xF4F4F4 }, { "Nachtblau", 0x0A1A40 }, { "PlayStation-Blau", 0x0070D1 },
+        { "Himmelblau", 0x4FC3F7 }, { "Tuerkis", 0x00B3A6 }, { "Gruen", 0x2E9E4F }, { "Gelb", 0xFFC800 },
+        { "Orange", 0xFF7A1A }, { "Rot", 0xE0303A }, { "Pink", 0xFF4F9A }, { "Lila", 0x7B3FBF },
+    };
+    uint32_t c[6];
+    ui_get_custom(c);
+    /* beim ersten Bearbeiten vom aktuellen Thema ausgehen */
+    if (!g_cfg.custom_colors[0]) { c[0] = COL_BG; c[1] = COL_PANEL; c[2] = COL_SEL; c[3] = COL_ACCENT; c[4] = COL_TEXT; c[5] = COL_DIM; }
+    ui_set_custom(c);
+    g_cfg.theme = ui_theme_custom_index();
+    ui_set_theme(g_cfg.theme);
+    for (;;) {
+        char lab[7][80];
+        const char *opts[7];
+        for (int i = 0; i < 6; i++) { snprintf(lab[i], sizeof lab[i], "%s:  #%06X", slots[i], abgr_to_rgb(c[i])); opts[i] = lab[i]; }
+        snprintf(lab[6], sizeof lab[6], "Fertig");
+        opts[6] = lab[6];
+        int k = ui_menu("Eigenes Thema - Farbe waehlen", opts, 7);
+        if (k < 0 || k == 6) break;
+        const char *popts[18];
+        int np = 0;
+        for (unsigned i = 0; i < sizeof palette / sizeof *palette; i++) popts[np++] = palette[i].name;
+        popts[np++] = "Hex-Code eingeben (RRGGBB) ...";
+        int pc = ui_menu(slots[k], popts, np);
+        if (pc < 0) continue;
+        if (pc == np - 1) {
+            char hex[16], init[16];
+            snprintf(init, sizeof init, "%06X", abgr_to_rgb(c[k]));
+            unsigned v;
+            if (ui_input_text("Farbe als RRGGBB, z. B. 0070D1", init, hex, sizeof hex) &&
+                sscanf(hex[0] == '#' ? hex + 1 : hex, "%6x", &v) == 1) c[k] = rgb_to_abgr(v);
+        } else {
+            c[k] = rgb_to_abgr(palette[pc].rgb);
+        }
+        ui_set_custom(c);                 /* sofort sichtbar */
+        save_custom_colors(c);
+        config_save();
+    }
+    save_custom_colors(c);
+}
+
+/* Menümusik: in den Menüs in Schleife, stoppt vor jeder Wiedergabe */
+static void stop_bgm(void)
+{
+    if (!bgm_active) return;
+    player_close();
+    bgm_active = 0;
+}
+
+static void bgm_update(Screen cur)
+{
+    int menu = cur == SCR_SOURCES || cur == SCR_LIST || cur == SCR_HISTORY || cur == SCR_SETTINGS;
+    if (!g_cfg.menu_music[0] || !menu || bg_active) {
+        if (bgm_active && (!g_cfg.menu_music[0] || cur == SCR_PLAYER)) stop_bgm();
+        return;
+    }
+    if (bgm_active && player_active()) return;
+    if (bgm_active) { player_close(); bgm_active = 0; }      /* Lied zu Ende: von vorn */
+    if (player_active() || bgm_fails >= 3) return;
+    char path[400];
+    snprintf(path, sizeof path, MUSIC_DIR "/%s", g_cfg.menu_music);
+    if (player_open(path, NULL) == 0) { bgm_active = 1; bgm_fails = 0; }
+    else bgm_fails++;
+}
+
+static void choose_music(void)
+{
+    static char names[40][128];
+    const char *opts[42];
+    int n = 0;
+    opts[n++] = "Aus";
+    mkdir(MUSIC_DIR, 0777);
+    DIR *d = opendir(MUSIC_DIR);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) && n < 41) {
+            size_t l = strlen(e->d_name);
+            const char *ext = l > 4 ? e->d_name + l - 4 : "";
+            if (e->d_name[0] != '.' && (!strcasecmp(ext, ".mp3") || !strcasecmp(ext, ".m4a") || !strcasecmp(ext, ".aac"))) {
+                snprintf(names[n - 1], sizeof names[0], "%s", e->d_name);
+                opts[n] = names[n - 1];
+                n++;
+            }
+        }
+        closedir(d);
+    }
+    if (n == 1) {
+        ui_message("Menuemusik", "Keine Musik gefunden. Kopiere MP3- oder M4A-Dateien per FTP (VitaShell) nach "
+                                 "ux0:data/VitaStream/music/ und waehle sie dann hier aus.");
+        return;
+    }
+    int c = ui_menu("Menuemusik waehlen", opts, n);
+    if (c < 0) return;
+    stop_bgm();
+    bgm_fails = 0;
+    if (c == 0) g_cfg.menu_music[0] = 0;
+    else snprintf(g_cfg.menu_music, sizeof g_cfg.menu_music, "%s", opts[c]);
+    config_save();
+}
+
 enum {
-    SET_THEME, SET_AUDIO_LANG, SET_ADBLOCK, SET_DNS, SET_PRESET, SET_CUSTOM_DNS, SET_RELOAD_BL, SET_PROXY,
+    SET_THEME, SET_THEME_EDIT, SET_MUSIC, SET_AUDIO_LANG, SET_ADBLOCK, SET_DNS, SET_PRESET, SET_CUSTOM_DNS, SET_RELOAD_BL, SET_PROXY,
     SET_ADD_PLAYLIST, SET_RELOAD_PLUGINS, SET_STATS, SET_COUNT
 };
 
@@ -634,6 +993,14 @@ static void label_settings(void *ctx, int i, const char **t, const char **sub)
     case SET_THEME:
         snprintf(tb, sizeof tb, "Thema: %s", ui_theme_name(g_cfg.theme));
         snprintf(sb, sizeof sb, "Links/Rechts oder Bestaetigen zum Wechseln (%d Themen)", ui_theme_count());
+        break;
+    case SET_THEME_EDIT:
+        snprintf(tb, sizeof tb, "Eigenes Thema gestalten ...");
+        snprintf(sb, sizeof sb, "Hintergrund, Flaechen, Auswahl, Akzent und Text selbst waehlen");
+        break;
+    case SET_MUSIC:
+        snprintf(tb, sizeof tb, "Menuemusik: %s", g_cfg.menu_music[0] ? g_cfg.menu_music : "Aus");
+        snprintf(sb, sizeof sb, "MP3/M4A aus ux0:data/VitaStream/music/ - laeuft in den Menues, stoppt beim Abspielen");
         break;
     case SET_AUDIO_LANG:
         snprintf(tb, sizeof tb, "Bevorzugte Tonspur: %s", g_cfg.audio_lang[0] ? g_cfg.audio_lang : "automatisch (Deutsch)");
@@ -692,6 +1059,12 @@ static void settings_action(int i, int dir)
         ui_set_theme(g_cfg.theme);
         break;
     }
+    case SET_THEME_EDIT:
+        theme_editor();
+        break;
+    case SET_MUSIC:
+        choose_music();
+        break;
     case SET_AUDIO_LANG: {
         char l[48];
         if (ui_input_text("Tonspur-Sprache (leer = automatisch)", g_cfg.audio_lang, l, sizeof l)) {
@@ -773,12 +1146,14 @@ int main(void)
     config_install_defaults();
     config_load();
     media_set_audio_pref(g_cfg.audio_lang);
+    apply_custom_colors();
     ui_set_theme(g_cfg.theme);
     reload_blocklist();
     net_init();
     plugins_init();
     thumbs_init();
     watched_load(VS_DATA_DIR "/watched.txt");
+    history_load(VS_DATA_DIR);
 
     if (!net_online())
         ui_message("Keine Verbindung", "Die Vita ist nicht mit dem Internet verbunden. "
@@ -790,14 +1165,48 @@ int main(void)
 
     while (running) {
         ui_poll(&in);
+        {
+            static char st[300];
+            const char *d = dl_status();
+            st[0] = 0;
+            if (bg_active && scr != SCR_PLAYER) {
+                if (!player_active()) {                     /* zu Ende oder Fehler */
+                    uint64_t dur = player_duration_ms();
+                    int ended = !player_error()[0];
+                    player_close();
+                    if (ended && play_key[0] && dur > 0) { watched_set(play_key, 1); progress_clear(play_key); }
+                    bg_active = 0;
+                } else {
+                    track_progress();
+                    sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);   /* Bildschirm darf aus, Ton läuft */
+                    if ((in.pressed & SCE_CTRL_SELECT) && scr != SCR_LOADING) {   /* zurück zum Player */
+                        in.pressed &= ~SCE_CTRL_SELECT;
+                        bg_active = 0;
+                        scr = SCR_PLAYER;
+                        osd_timer = 180;
+                    } else {
+                        char a[32];
+                        fmt_time(player_position_ms(), a, sizeof a);
+                        snprintf(st, sizeof st, "%s %s  %s  -  SELECT: Player%s%s", player_paused() ? "||" : ">", a, play_title,
+                                 d[0] ? "   |   " : "", d);
+                    }
+                }
+            }
+            ui_set_status(st[0] ? st : d);
+        }
+        bgm_update(scr);
 
         switch (scr) {
         /* ---------- Quellenliste ---------- */
         case SCR_SOURCES: {
-            int n = plugins_source_count();
-            if (in.pressed & SCE_CTRL_UP)   src_cursor = src_cursor > 0 ? src_cursor - 1 : (n ? n - 1 : 0);
-            if (in.pressed & SCE_CTRL_DOWN) src_cursor = n ? (src_cursor + 1) % n : 0;
-            if ((in.pressed & BTN_ACCEPT) && n) open_source(src_cursor);
+            int n = plugins_source_count() + 1;     /* + "Zuletzt gesehen" */
+            if (src_cursor >= n) src_cursor = 0;
+            if (in.pressed & SCE_CTRL_UP)   src_cursor = src_cursor > 0 ? src_cursor - 1 : n - 1;
+            if (in.pressed & SCE_CTRL_DOWN) src_cursor = (src_cursor + 1) % n;
+            if (in.pressed & BTN_ACCEPT) {
+                if (src_cursor == 0) { scr = SCR_HISTORY; if (hist_cursor >= history_count()) hist_cursor = 0; }
+                else open_source(src_cursor - 1);
+            }
             if (in.pressed & SCE_CTRL_TRIANGLE) scr = SCR_SETTINGS;
             if (in.pressed & SCE_CTRL_START) running = 0;
 
@@ -808,8 +1217,45 @@ int main(void)
                      g_cfg.adblock_enabled ? "AN" : "AUS", g_cfg.custom_dns_enabled ? "AN" : "AUS");
             ui_header("VitaStream - Quellen", right);
             ui_list_thumbs(n, src_cursor, &src_scroll, label_sources_thumb, NULL);
-            if (n == 0) ui_text(40, 180, COL_DIM, "Keine Plugins gefunden in " VS_DATA_DIR "/plugins");
+            if (n == 1) ui_text(40, 240, COL_DIM, "Keine Plugins gefunden in " VS_DATA_DIR "/plugins");
             ui_footer("Bestaetigen: Oeffnen   Dreieck: Einstellungen   START: Beenden");
+            ui_end();
+            break;
+        }
+
+        /* ---------- Zuletzt gesehen ---------- */
+        case SCR_HISTORY: {
+            int n = history_count();
+            if (in.pressed & SCE_CTRL_UP)   hist_cursor = hist_cursor > 0 ? hist_cursor - 1 : (n ? n - 1 : 0);
+            if (in.pressed & SCE_CTRL_DOWN) hist_cursor = n ? (hist_cursor + 1) % n : 0;
+            int page = ui_list_thumbs_visible();
+            if (in.pressed & SCE_CTRL_LTRIGGER) hist_cursor = hist_cursor > page ? hist_cursor - page : 0;
+            if (in.pressed & SCE_CTRL_RTRIGGER) hist_cursor = hist_cursor + page < n ? hist_cursor + page : (n ? n - 1 : 0);
+            if ((in.pressed & BTN_ACCEPT) && n) {
+                play_history(hist_cursor);
+            } else if ((in.pressed & SCE_CTRL_SQUARE) && n) {
+                const HistEntry *e = history_get(hist_cursor);
+                const char *opts[] = { "Aus dem Verlauf entfernen", "Gesehen-Markierung entfernen", "Ganzen Verlauf leeren" };
+                int c = ui_menu(e->title, opts, 3);
+                if (c == 0) history_remove(hist_cursor);
+                else if (c == 1) { watched_set(e->key, 0); progress_clear(e->key); }
+                else if (c == 2) {
+                    const char *yn[] = { "Ja, alles leeren", "Abbrechen" };
+                    if (ui_menu("Verlauf wirklich leeren?", yn, 2) == 0) history_clear();
+                }
+                n = history_count();
+                if (hist_cursor >= n) hist_cursor = n ? n - 1 : 0;
+            } else if (in.pressed & BTN_CANCEL) {
+                scr = SCR_SOURCES;
+            }
+            if (scr != SCR_HISTORY) break;
+            ui_begin();
+            char right[32];
+            snprintf(right, sizeof right, "%d Eintraege", n);
+            ui_header("Zuletzt gesehen", right);
+            if (n) ui_list_thumbs(n, hist_cursor, &hist_scroll, label_history, NULL);
+            else ui_text(40, 200, COL_DIM, "Hier erscheint alles, was du abspielst - mit der Stelle, an der du aufgehoert hast.");
+            ui_footer("Bestaetigen: Abspielen   Quadrat: Entfernen   Zurueck");
             ui_end();
             break;
         }
@@ -920,11 +1366,49 @@ int main(void)
                     save_job.pos++;
                     start_save_next();
                     break;
+                } else if (pending == PEND_DOWNLOAD) {
+                    StreamInfo si;
+                    plugins_take_stream(&si);
+                    char rfile[64], rid[1024];
+                    scr = SCR_LIST;
+                    pending = PEND_NONE;
+                    if (parse_ref(si.url, rfile, sizeof rfile, rid, sizeof rid))
+                        ui_message("Herunterladen", "Gespeicherte Verweise bitte direkt aus ihrer Quelle herunterladen.");
+                    else if (strstr(si.url, ".m3u8") || strstr(si.url, ".M3U8") || strstr(si.url, "/manifest") || strstr(si.url, "master.m3u"))
+                        ui_message("Herunterladen", "Das ist ein Stream (HLS), keine Datei - Streams lassen sich nicht herunterladen. "
+                                                     "Geht bei Mediatheken, Podcasts, Internet Archive und eigenen Jellyfin-Dateien.");
+                    else if (dl_start(si.url, si.headers, dl_title) != 0)
+                        ui_message("Herunterladen", "Es laeuft bereits ein Download.");
+                    break;
                 } else if (pending == PEND_PLAY) {
                     StreamInfo si;
                     plugins_take_stream(&si);
+                    char rfile[64], rid[1024];
+                    if (parse_ref(si.url, rfile, sizeof rfile, rid, sizeof rid)) {
+                        /* gespeicherter Verweis: über die ursprüngliche Quelle frisch auflösen */
+                        int rs = plugins_find_source(rfile);
+                        /* im Verlauf den Verweis merken, nicht die ablaufende Stream-Adresse */
+                        snprintf(cur_hist.src, sizeof cur_hist.src, "%s", rfile);
+                        snprintf(cur_hist.id, sizeof cur_hist.id, "%s", rid);
+                        cur_hist.save_ref = 1;
+                        if (rs >= 0 && ref_hops++ < 2 && plugins_start_resolve_id(rs, rid, play_title) == 0) break;
+                        ui_message("Wiedergabe fehlgeschlagen", rs < 0 ? "Die Quelle dieses Eintrags ist nicht installiert." : "Verweis konnte nicht aufgeloest werden.");
+                        scr = scr_before_loading;
+                        pending = PEND_NONE;
+                        break;
+                    }
+                    ref_hops = 0;
                     cur_si = si;
-                    resume_ms = 0;
+                    resume_ms = pending_resume;
+                    pending_resume = 0;
+                    if (cur_hist.src[0]) {
+                        if (!cur_hist.save_ref) {
+                            snprintf(cur_hist.url, sizeof cur_hist.url, "%s", si.url);
+                            snprintf(cur_hist.headers, sizeof cur_hist.headers, "%s", si.headers);
+                        }
+                        history_add(&cur_hist);
+                        if (from_history) hist_cursor = 0;
+                    }
                     sub_close();
                     media_set_audio_pref(g_cfg.audio_lang);
                     if (player_open(si.url, si.headers) == 0) {
@@ -989,7 +1473,7 @@ int main(void)
             if (in.pressed & SCE_CTRL_LTRIGGER)   player_seek_rel(-60);
             if (in.pressed & SCE_CTRL_RTRIGGER)   player_seek_rel(60);
             if (in.pressed & SCE_CTRL_SELECT)     player_toggle_debug();
-            if (in.pressed & SCE_CTRL_TRIANGLE) { av_menu(); if (!player_active()) { sub_close(); scr = depth ? SCR_LIST : SCR_SOURCES; break; } }
+            if (in.pressed & SCE_CTRL_TRIANGLE) { av_menu(); if (!player_active()) { sub_close(); scr = return_screen(); break; } }
 
             /* nach Tonspurwechsel an die alte Stelle springen */
             if (resume_ms > 0 && media_state() == MS_PLAYING) {
@@ -998,25 +1482,20 @@ int main(void)
                 resume_ms = 0;
             }
 
-            /* Gesehen: automatisch, sobald 90 % angeschaut sind */
-            {
-                uint64_t d = player_duration_ms(), p = player_position_ms();
-                if (!play_marked && play_key[0] && d > 60000 && p >= d * 9 / 10) {
-                    watched_set(play_key, 1);
-                    play_marked = 1;
-                }
-            }
+            /* Gesehen: automatisch, sobald 90 % angeschaut sind; Fortschritt sichern */
+            track_progress();
 
             /* Hoch/Runter: vorheriger/nächster Eintrag der Liste (Senderwechsel, nächste Folge).
                Schutz vor versehentlichem Umschalten: der erste Druck zeigt nur das Ziel an,
                ein zweiter Druck in dieselbe Richtung (innerhalb von ca. 2 s) wechselt. */
             if (zap_timer > 0 && --zap_timer == 0) zap_target = -1;
-            if ((in.pressed & (SCE_CTRL_UP | SCE_CTRL_DOWN)) && depth > 0) {
+            if ((in.pressed & (SCE_CTRL_UP | SCE_CTRL_DOWN)) && depth > 0 && !from_history) {
                 int dir = (in.pressed & SCE_CTRL_UP) ? -1 : 1;
                 if (zap_target >= 0 && zap_dir == dir && zap_timer > 0) {
                     int next = zap_target;
                     zap_target = -1;
                     zap_timer = 0;
+                    save_progress_now();
                     player_close();
                     sub_close();
                     scr = SCR_LIST;
@@ -1029,24 +1508,32 @@ int main(void)
             }
 
             int quit = (in.pressed & BTN_CANCEL) != 0;
+            int stop = (in.pressed & SCE_CTRL_START) != 0;
+            if (quit && !stop && player_active() && !media_has_video() && media_state() == MS_PLAYING) {
+                /* reiner Ton (Musik, Radio, Podcast): im Hintergrund weiterspielen */
+                bg_active = 1;
+                scr = return_screen();
+                break;
+            }
+            if (stop) quit = 1;
             if (!quit && !player_active()) {
                 const char *e = player_error();
                 int ended = !e[0];
                 uint64_t d = player_duration_ms();
                 player_close();
-                if (ended && play_key[0] && d > 0) watched_set(play_key, 1);   /* bis zum Ende geschaut */
+                if (ended && play_key[0] && d > 0) { watched_set(play_key, 1); progress_clear(play_key); }   /* bis zum Ende geschaut */
                 if (e[0]) ui_message("Wiedergabe beendet", e);
                 quit = 2;
             }
             if (quit) {
-                if (quit == 1) player_close();
+                if (quit == 1) { save_progress_now(); player_close(); }
                 sub_close();
-                scr = depth ? SCR_LIST : SCR_SOURCES;
+                scr = return_screen();
                 break;
             }
 
             /* Bildschirm während der Wiedergabe nicht abdunkeln */
-            sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
+            sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);   /* alle Zeitgeber: Abdunkeln, Bildschirm aus, Ruhemodus */
 
             ui_begin();
             player_draw();
@@ -1071,8 +1558,9 @@ int main(void)
                 }
                 ui_text(20, SCREEN_H - 22, OSD_TEXT, line);
                 ui_text_scaled(SCREEN_W - 700, SCREEN_H - 22, OSD_DIM, 0.8f,
-                    player_paused() ? "PAUSE   Links/Rechts: 10 s   L/R: 60 s   Dreieck: Ton/UT   SELECT: Infos"
-                                    : "Pause   Links/Rechts: 10 s   L/R: 60 s   Dreieck: Ton/UT   SELECT: Infos");
+                    player_paused() ? "PAUSE   Links/Rechts: 10 s   L/R: 60 s   Dreieck: Ton/UT   START: Stopp"
+                                    : (media_has_video() ? "Pause   Links/Rechts: 10 s   L/R: 60 s   Dreieck: Ton/UT   START: Stopp"
+                                                         : "Pause   L/R: 60 s   Zurueck: im Hintergrund weiter   START: Stopp"));
             }
             if (zap_timer > 0) {
                 char zl[300];
@@ -1101,7 +1589,7 @@ int main(void)
             if (in.pressed & (BTN_CANCEL | SCE_CTRL_TRIANGLE)) {
                 config_save();
                 scr = SCR_SOURCES;
-                if (src_cursor >= plugins_source_count()) src_cursor = 0;
+                if (src_cursor > plugins_source_count()) src_cursor = 0;
             }
             if (scr != SCR_SETTINGS) break;
             ui_begin();
@@ -1114,9 +1602,12 @@ int main(void)
         }
     }
 
+    if (bg_active) save_progress_now();
     player_close();
+    sub_close();
     stack_clear();
     thumbs_shutdown();
+    dl_shutdown();
     plugins_shutdown();
     net_term();
     config_save();
