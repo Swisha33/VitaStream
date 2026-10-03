@@ -466,23 +466,22 @@ int media_current_frame(int *w, int *h, int *yuv)
             FSlot *s = &M.slot[i];
             if (s->st == FS_READY && s->pts <= clk + 15000 && (best < 0 || s->pts > M.slot[best].pts)) best = i;
         }
-        /* Zeitsprung (Werbeblock, Live-Diskontinuität): Bilder weit weg von der Uhr */
-        if (best < 0 && min_i >= 0) {
+        /* Zeitsprung (Werbeblock, Live-Diskontinuität, getrennte Spuren nach Sprung):
+           alle Bilder liegen weit vor oder weit hinter der Uhr */
+        if (best < 0 || (min_i >= 0 && audio_is_master())) {
             int64_t newest = INT64_MIN;
             for (int i = 0; i < MEDIA_SLOTS; i++)
                 if (M.slot[i].st == FS_READY && M.slot[i].pts > newest) newest = M.slot[i].pts;
-            if (audio_is_master()) {
-                /* Ton führt, Bild liegt weit daneben (Sprung mit getrennten Spuren, Werbeblock,
-                   Diskontinuität): Bild-Zeitachse an den Ton anlehnen statt Bilder zu verwerfen */
-                if (min_pts - clk > 2500000 || newest < clk - 2500000) {
-                    int64_t shift = clk - min_pts;
-                    M.v_offset += shift;
-                    for (int i = 0; i < MEDIA_SLOTS; i++)
-                        if (M.slot[i].st == FS_READY) M.slot[i].pts += shift;
-                    best = min_i;
-                    M.resyncs++;
-                }
-            } else if (min_pts - clk > 2000000 || newest < clk - 2000000) {
+            int far = min_i >= 0 && (min_pts - clk > 2500000 || newest < clk - 2500000);
+            if (far && audio_is_master()) {
+                /* Ton führt: Bild-Zeitachse an den Ton anlehnen statt Bilder zu verwerfen */
+                int64_t shift = clk - min_pts;
+                M.v_offset += shift;
+                for (int i = 0; i < MEDIA_SLOTS; i++)
+                    if (M.slot[i].st == FS_READY) M.slot[i].pts += shift;
+                best = min_i;
+                M.resyncs++;
+            } else if (far && best < 0) {
                 clock_set(min_pts, 0);   /* Systemuhr springt mit */
                 best = min_i;
             }
