@@ -108,6 +108,7 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE data/plugins/mediathek.lua data/plugins/mediathek.lua
   FILE data/plugins/jellyfin.lua data/plugins/jellyfin.lua
   FILE data/plugins/website.lua data/plugins/website.lua
+  FILE data/plugins/explorer.lua data/plugins/explorer.lua
   FILE data/config.ini data/config.ini
   FILE data/cacert.pem data/cacert.pem
   FILE data/blocklist.txt data/blocklist.txt

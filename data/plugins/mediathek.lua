@@ -190,19 +190,152 @@ end
 
 local function folder(title, id, sub) return { title = title, id = id, kind = "folder", subtitle = sub } end
 
+-- ================================================================ Internet Archive
+-- Offener, legaler Katalog frei zugaenglicher Filme/Shows in vielen Sprachen
+-- (advancedsearch-API + Metadaten). Dient als englische/kroatische/mehrsprachige Mediathek.
+local IA_SEARCH = "https://archive.org/advancedsearch.php"
+local IA_PAGE = 50
+
+-- Sprachen: Anzeige -> Suchausdruck fuer das Feld "language"
+local IA_LANGS = {
+  en = { "English", 'language:("English" OR "eng")' },
+  hr = { "Hrvatski", 'language:("Croatian" OR "Hrvatski" OR "hrv" OR "hr")' },
+  fr = { "Francais", 'language:("French" OR "fra")' },
+  es = { "Espanol",  'language:("Spanish" OR "spa")' },
+  it = { "Italiano", 'language:("Italian" OR "ita")' },
+  ru = { "Russkij",  'language:("Russian" OR "rus")' },
+}
+-- Kategorien fuer das Internet Archive: Anzeige + Zusatz zur Suche
+local IA_CATS = {
+  { "Filme & Shows",       'mediatype:(movies)' },
+  { "Public-Domain-Klassiker", 'collection:(feature_films)' },
+  { "Dokumentationen",     'mediatype:(movies) AND subject:(documentary OR Doku)' },
+  { "Kinder & Zeichentrick", 'mediatype:(movies) AND subject:(children OR cartoon OR animation)' },
+  { "Musik & Konzerte",    'mediatype:(movies) AND subject:(concert OR music)' },
+}
+
+local function ia_list(query_expr, lang_expr, page)
+  local q = query_expr .. " AND " .. lang_expr
+  local url = IA_SEARCH .. "?q=" .. enc(q)
+           .. "&fl[]=identifier&fl[]=title&fl[]=year&fl[]=language"
+           .. "&sort[]=downloads+desc&rows=" .. IA_PAGE .. "&page=" .. (page + 1) .. "&output=json"
+  local body, status = vs.http_get(url)
+  if not body then return nil, "Internet Archive nicht erreichbar (" .. tostring(status) .. ")" end
+  local ok, data = pcall(json.decode, body)
+  if not ok or type(data) ~= "table" or not data.response then return nil, "Antwort unlesbar" end
+  local docs = data.response.docs or {}
+  local items = {}
+  for _, d in ipairs(docs) do
+    if d.identifier then
+      local title = type(d.title) == "table" and d.title[1] or d.title or d.identifier
+      items[#items + 1] = {
+        title = tostring(title), subtitle = d.year and ("Jahr " .. tostring(d.year)) or "Internet Archive",
+        id = "iaplay:" .. d.identifier, kind = "video",
+        thumb = "https://archive.org/services/img/" .. d.identifier,
+      }
+    end
+  end
+  local total = data.response.numFound or #docs
+  local shown = page * IA_PAGE + #docs
+  return items, total, shown
+end
+
+local function ia_page(query_expr, lang_expr, page, more_prefix)
+  local items, total, shown = ia_list(query_expr, lang_expr, page)
+  if not items then return nil, total end
+  if #items == 0 then return nil, "Nichts gefunden" end
+  if #items == IA_PAGE and shown < total then
+    items[#items + 1] = { title = string.format("Weitere laden (%d von %d)", shown, total),
+                          kind = "more", id = more_prefix .. (page + 1) }
+  end
+  return items
+end
+
+-- Internet-Archive-Eintrag aufloesen: kleinste MP4-Ableitung waehlen (Vita-geeignet)
+local function ia_resolve(identifier)
+  local body = vs.http_get("https://archive.org/metadata/" .. identifier)
+  local ok, meta = pcall(json.decode, body or "")
+  if not ok or type(meta) ~= "table" or type(meta.files) ~= "table" then
+    return nil, "Internet Archive: keine Metadaten"
+  end
+  local best, best_size
+  for _, f in ipairs(meta.files) do
+    local name = (f.name or ""):lower()
+    if name:match("%.mp4$") or name:match("%.m4v$") then
+      local size = tonumber(f.size) or 0
+      if not best or (size > 0 and size < best_size) then best, best_size = f.name, size end
+    end
+  end
+  if not best then return nil, "Internet Archive: keine abspielbare MP4-Datei (evtl. nur andere Formate)" end
+  return "https://archive.org/download/" .. identifier .. "/" .. (enc(best):gsub("%%2F", "/"))
+end
+
+local function ia_search(lang, text, page)
+  local L = IA_LANGS[lang]
+  if not L then return nil, "Unbekannte Sprache" end
+  local t = text:gsub('[()"]', " ")
+  return ia_page('mediatype:(movies) AND (title:(' .. t .. ') OR subject:(' .. t .. '))',
+                 L[2], page, "iaq:" .. lang .. ":" .. enc(text) .. ":")
+end
+
+local function ia_home(lang)
+  local L = IA_LANGS[lang]
+  if not L then return nil, "Unbekannte Sprache" end
+  local items = {
+    { title = "Suchen ...", subtitle = L[1] .. " im Internet Archive", id = "iasearch:" .. lang, kind = "search" },
+  }
+  for ci, c in ipairs(IA_CATS) do
+    items[#items + 1] = folder(c[1], "ia:" .. lang .. ":" .. ci .. ":0")
+  end
+  return items
+end
+
+-- ================================================================
+
 return {
-  name = "Mediatheken (ARD, ZDF, arte ...)",
-  description = "Oeffentlich-rechtliche Sendungen nach Sender und Kategorie - Dreieck zum Suchen",
+  name = "Mediatheken (nach Sprache)",
+  description = "Deutsche Mediatheken + freie Kataloge in anderen Sprachen - Dreieck zum Suchen",
 
   browse = function(id)
     if id == nil then
+      return {
+        { title = "Suchen (deutsche Mediatheken) ...", subtitle = "Sendung, Thema oder Titel", id = "search", kind = "search" },
+        folder("Deutsch", "lang:de", "ARD, ZDF, arte, 3sat, ORF, SRF ... (MediathekViewWeb)"),
+        folder("English", "lang:en", "Freie Filme & Shows (Internet Archive)"),
+        folder("Hrvatski / Kroatisch", "lang:hr", "Freie Inhalte auf Kroatisch (Internet Archive)"),
+        folder("Francais", "lang:fr", "Freie Inhalte auf Franzoesisch (Internet Archive)"),
+        folder("Espanol", "lang:es", "Freie Inhalte auf Spanisch (Internet Archive)"),
+        folder("Weitere Sprachen", "lang:more", "Italienisch, Russisch ... (Internet Archive)"),
+      }
+    end
+
+    -- Sprach-Startseiten
+    if id == "lang:de" then
       local items = {
-        { title = "Suchen ...", subtitle = "Sendung, Thema oder Titel in allen Mediatheken", kind = "search" },
+        { title = "Suchen ...", subtitle = "in allen deutschen Mediatheken", id = "search", kind = "search" },
         folder("Alle Sender", "ch:" .. enc(""), "Kategorien ueber alle Mediatheken"),
       }
       for _, ch in ipairs(CHANNELS) do items[#items + 1] = folder(ch, "ch:" .. enc(ch)) end
       return items
     end
+    if id == "lang:more" then
+      return {
+        folder("Italiano", "lang:it"), folder("Russkij", "lang:ru"),
+        folder("Francais", "lang:fr"), folder("Espanol", "lang:es"),
+      }
+    end
+    local lang = id:match("^lang:(%a%a)$")
+    if lang then return ia_home(lang) end
+
+    -- Internet-Archive-Kategorie / -Suche
+    local ialang, iaci, iaoff = id:match("^ia:(%a%a):(%d+):(%d+)$")
+    if ialang then
+      local L, C = IA_LANGS[ialang], IA_CATS[tonumber(iaci)]
+      if not (L and C) then return nil, "Unbekannt" end
+      return ia_page(C[2], L[2], tonumber(iaoff), "ia:" .. ialang .. ":" .. iaci .. ":")
+    end
+    local ialq, iaquery, iaqoff = id:match("^iaq:(%a%a):(.-):(%d+)$")
+    if ialq then return ia_search(ialq, dec(iaquery), tonumber(iaqoff)) end
 
     -- Sender-Startseite: Neueste, Sendungen, Kategorien
     local ch = id:match("^ch:(.*)$")
@@ -267,7 +400,13 @@ return {
     return nil, "Unbekannter Eintrag"
   end,
 
-  search = function(text)
+  search = function(text, ctx)
+    local ialang = ctx and ctx:match("^iasearch:(%a%a)$")
+    if ialang then
+      local items, err = ia_search(ialang, text, 0)
+      if not items then return nil, (err == "Nichts gefunden") and ("Nichts gefunden fuer: " .. text) or err end
+      return items
+    end
     local items, err = grouped_page({ { fields = { "title", "topic" }, query = text } }, 0, 2,
                                     "search:" .. enc(text) .. ":", true)
     if not items then return nil, err == "Keine Sendungen gefunden" and ("Nichts gefunden fuer: " .. text) or err end
@@ -275,6 +414,8 @@ return {
   end,
 
   resolve = function(item)
+    local ident = item.id:match("^iaplay:(.+)$")
+    if ident then return ia_resolve(ident) end
     return item.id
   end,
 }

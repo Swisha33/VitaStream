@@ -40,6 +40,7 @@ typedef struct {
     int        cursor, scroll;
     int        is_search;      /* Herkunft für "Aktualisieren": search(arg) oder browse(arg) */
     char      *arg;            /* NULL = Startseite */
+    char      *ctx;            /* Suchkontext (id des Such-Eintrags) */
 } Level;
 
 static Screen  scr = SCR_SOURCES, scr_before_loading = SCR_SOURCES;
@@ -58,6 +59,7 @@ static char    play_key[2304];          /* Schlüssel für "Gesehen" */
 static char    play_title[256];
 static int     play_marked;
 static char   *pending_arg;
+static char   *pending_ctx;
 static int     zap_target = -1, zap_dir, zap_timer;   /* Senderwechsel: wartet auf 2. Druck */
 
 /* Speichern in eine Playlist: Einträge nacheinander auflösen */
@@ -92,7 +94,9 @@ static void level_free(Level *lv)
 {
     plugins_list_free(&lv->list);
     free(lv->arg);
+    free(lv->ctx);
     lv->arg = NULL;
+    lv->ctx = NULL;
 }
 
 static void stack_clear(void)
@@ -102,25 +106,33 @@ static void stack_clear(void)
 
 static void start_job_screen(Pending p, const char *title);
 
-static void set_pending_origin(int is_search, const char *arg)
+static void set_pending_origin(int is_search, const char *arg, const char *ctx)
 {
     free(pending_arg);
+    free(pending_ctx);
     pending_arg = arg ? strdup(arg) : NULL;
+    pending_ctx = (ctx && ctx[0]) ? strdup(ctx) : NULL;
     pending_is_search = is_search;
+}
+
+static int restart_level(const Level *lv)
+{
+    return lv->is_search ? plugins_start_search_ctx(cur_src, lv->arg, lv->ctx)
+                         : plugins_start_browse(cur_src, lv->arg);
 }
 
 static int start_browse(const char *id, const char *title)
 {
     if (plugins_start_browse(cur_src, id) != 0) return -1;
-    set_pending_origin(0, id);
+    set_pending_origin(0, id, NULL);
     start_job_screen(PEND_PUSH_LIST, title);
     return 0;
 }
 
-static int start_search(const char *q, const char *title)
+static int start_search(const char *q, const char *ctx, const char *title)
 {
-    if (plugins_start_search(cur_src, q) != 0) return -1;
-    set_pending_origin(1, q);
+    if (plugins_start_search_ctx(cur_src, q, ctx) != 0) return -1;
+    set_pending_origin(1, q, ctx);
     start_job_screen(PEND_PUSH_LIST, title);
     return 0;
 }
@@ -153,12 +165,12 @@ static void open_source(int idx)
             snprintf(last_query, sizeof last_query, "%s", q);
             char t[160];
             snprintf(t, sizeof t, "%s: %s", s->name, q);
-            start_search(q, t);
+            start_search(q, NULL, t);
         }
     }
 }
 
-static void search_in_current_titled(const char *prompt)
+static void search_in_current_titled(const char *prompt, const char *ctx)
 {
     Source *s = plugins_source(cur_src);
     if (!s || !s->has_search) return;
@@ -167,11 +179,24 @@ static void search_in_current_titled(const char *prompt)
         snprintf(last_query, sizeof last_query, "%s", q);
         char t[160];
         snprintf(t, sizeof t, "Suche: %s", q);
-        start_search(q, t);
+        start_search(q, ctx, t);
     }
 }
 
-static void search_in_current(void) { search_in_current_titled("Suchen"); }
+/* Dreieck: Suchkontext der aktuellen Liste (Such-Eintrag mit id, sonst Herkunft der Liste) */
+static void search_in_current(void)
+{
+    const char *ctx = NULL, *prompt = "Suchen";
+    if (depth > 0) {
+        Level *lv = &stack[depth - 1];
+        for (int i = 0; i < lv->list.count; i++) {
+            PluginItem *it = &lv->list.items[i];
+            if (it->kind == ITEM_SEARCH && it->id && it->id[0]) { ctx = it->id; prompt = it->title; break; }
+        }
+        if (!ctx && lv->is_search) ctx = lv->ctx;
+    }
+    search_in_current_titled(prompt, ctx);
+}
 
 static void fmt_time(uint64_t ms, char *out, int n)
 {
@@ -664,7 +689,7 @@ int main(void)
                     thumbs_drop_pending();
                     start_browse(it->id, it->title);
                 } else if (it->kind == ITEM_SEARCH) {
-                    search_in_current_titled(it->title);
+                    search_in_current_titled(it->title, it->id);
                 } else if (it->kind == ITEM_MORE) {
                     append_index = lv->cursor;
                     if (plugins_start_browse(cur_src, it->id) == 0) start_job_screen(PEND_APPEND, lv->title);
@@ -707,7 +732,9 @@ int main(void)
                         snprintf(lv->title, sizeof lv->title, "%s", pending_title);
                         lv->is_search = pending_is_search;
                         lv->arg = pending_arg;
+                        lv->ctx = pending_ctx;
                         pending_arg = NULL;
+                        pending_ctx = NULL;
                         scr = SCR_LIST;
                     } else {
                         plugins_job_reset();
@@ -733,8 +760,7 @@ int main(void)
                     if (msg[0]) ui_message("Erledigt", msg);
                     if (refresh && depth > 0) {
                         Level *lv = &stack[depth - 1];
-                        int r = lv->is_search ? plugins_start_search(cur_src, lv->arg)
-                                              : plugins_start_browse(cur_src, lv->arg);
+                        int r = restart_level(lv);
                         if (r == 0) start_job_screen(PEND_REFRESH, lv->title);
                     }
                     break;
@@ -782,7 +808,7 @@ int main(void)
                     if (depth == 0) scr = SCR_SOURCES;
                     else {
                         Level *up = &stack[depth - 1];
-                        int r = up->is_search ? plugins_start_search(cur_src, up->arg) : plugins_start_browse(cur_src, up->arg);
+                        int r = restart_level(up);
                         if (r == 0) { scr = SCR_LIST; start_job_screen(PEND_REFRESH, up->title); }
                         else scr = SCR_LIST;
                     }
@@ -791,7 +817,7 @@ int main(void)
                 ui_message("Fehler", msg);
                 /* Startseite einer Quelle leer, aber Suche möglich: direkt eingeben lassen */
                 Source *src = plugins_source(cur_src);
-                if (was == PEND_PUSH_LIST && depth == 0 && src && src->has_search) search_in_current_titled(src->name);
+                if (was == PEND_PUSH_LIST && depth == 0 && src && src->has_search) search_in_current_titled(src->name, NULL);
             } else {
                 ui_begin();
                 ui_header(pending_title, NULL);
@@ -827,23 +853,22 @@ int main(void)
                 }
             }
 
-            /* Hoch/Runter: vorheriger/nächster Eintrag der Liste (Senderwechsel, nächste Folge).
-               Erst zweimal dieselbe Richtung wechselt - ein versehentlicher Druck zeigt nur das Ziel an. */
-            if (zap_timer > 0 && --zap_timer == 0) zap_target = -1;
+            /* Hoch/Runter: direkt zum vorherigen/nächsten Eintrag der Liste
+               (Senderwechsel, nächste Folge). */
+            if (zap_timer > 0) zap_timer--;
             if ((in.pressed & (SCE_CTRL_UP | SCE_CTRL_DOWN)) && depth > 0) {
                 int dir = (in.pressed & SCE_CTRL_UP) ? -1 : 1;
-                if (zap_target >= 0 && zap_dir == dir) {
-                    int next = zap_target;
-                    zap_target = -1;
-                    zap_timer = 0;
+                int next = neighbour_video(play_index, dir);
+                if (next >= 0) {
                     player_close();
                     scr = SCR_LIST;
                     start_play(next);
                     break;
                 }
+                /* kein weiterer Eintrag: kurz anzeigen */
                 zap_dir = dir;
-                zap_target = neighbour_video(play_index, dir);
-                zap_timer = 120;   /* ca. 2 s */
+                zap_target = -1;
+                zap_timer = 90;
             }
 
             int quit = (in.pressed & BTN_CANCEL) != 0;
@@ -878,7 +903,7 @@ int main(void)
 
                 ui_rect(0, 0, SCREEN_W, 40, 0xB0000000);
                 ui_text_clipped(20, 28, SCREEN_W - 260, COL_TEXT, play_title);
-                if (depth > 0) ui_text_scaled(SCREEN_W - 230, 28, COL_DIM, 0.8f, "2x Hoch/Runter: wechseln");
+                if (depth > 0) ui_text_scaled(SCREEN_W - 230, 28, COL_DIM, 0.8f, "Hoch/Runter: wechseln");
                 ui_rect(0, SCREEN_H - 70, SCREEN_W, 70, 0xB0000000);
                 if (dur) {
                     int w = (int)((SCREEN_W - 40) * (double)pos / (double)dur);
@@ -892,12 +917,7 @@ int main(void)
             }
             if (zap_timer > 0) {
                 char zl[300];
-                if (zap_target >= 0)
-                    snprintf(zl, sizeof zl, "%s: %s   -   nochmal %s druecken zum Wechseln",
-                             zap_dir < 0 ? "Vorheriger" : "Naechster",
-                             stack[depth - 1].list.items[zap_target].title, zap_dir < 0 ? "Hoch" : "Runter");
-                else
-                    snprintf(zl, sizeof zl, "Kein %s Eintrag in der Liste", zap_dir < 0 ? "vorheriger" : "weiterer");
+                snprintf(zl, sizeof zl, "Kein %s Eintrag in der Liste", zap_dir < 0 ? "vorheriger" : "weiterer");
                 ui_rect(0, SCREEN_H / 2 - 30, SCREEN_W, 50, 0xC0000000);
                 ui_text_clipped(30, SCREEN_H / 2 + 3, SCREEN_W - 60, COL_TEXT, zl);
             }

@@ -9,12 +9,13 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
 
 - **Quellen-Plugins in Lua** – Suchen, Durchblättern, Abspielen, mit Vorschaubildern und „Weitere laden“.
 - **Mitgelieferte Quellen**
-  - *Mediatheken* – ARD, ZDF, arte, 3sat, KiKA … pro Sender: Neueste, Sendungen, Kategorien (Filme, Dokus, Krimis …), ohne 80er-Grenze
+  - *Mediatheken nach Sprache* – Deutsch: ARD, ZDF, arte, 3sat, KiKA … pro Sender Neueste, Sendungen, Kategorien; English, Hrvatski, Français, Español u. a.: freie Filme & Shows aus dem Internet Archive (Kategorien + Suche)
   - *Sender-Finder* – tausende frei empfangbare Sender (iptv-org) nach Kategorie, Land, Sprache; Pluto TV, Samsung TV Plus, Rakuten TV; Anime & Zeichentrick
   - *South Park* – alle Staffeln von southpark.de (Deutsch/Englisch)
   - *Jellyfin* – eigener Jellyfin-Server: Mediathek 1:1 abgebildet (Ansichten → Serien → Staffeln → Folgen), Server transkodiert bei Bedarf nach H.264/720p
   - *M3U-Playlists & Favoriten* – eigene Listen, Logos, Gruppen
   - *Direkte URL & Website-Scanner* – Link abspielen oder eine Website nach Videos/Streams durchsuchen
+  - *Website-Explorer* – Website eingeben, ihre Suche nutzen (Top-5-Treffer), alle Videos und Player einer Seite auflisten; spielt direkte Links und offene Plattformen (archive.org, Vimeo, Dailymotion, PeerTube) ab – keine Entschlüsselung verschleierter Hoster
   - *Eigene Websites* – per Muster in `sites.txt`
 - **Favoriten & Playlists** – mit Quadrat einzelne Einträge oder ganze Listen speichern; eigene Playlists bearbeiten (löschen, umbenennen, verschieben), defekte Streams automatisch entfernen, Online-Listen als bearbeitbare Kopie übernehmen
 - **Player** – MP4, HLS (inkl. AES-128 und separater Tonspuren), MPEG-TS; Hardware-H.264 bis 720p, Software-Ersatz für SD/Interlaced; AAC/MP3/AC3; Werbeunterbrechungen (Zeitsprünge) werden überbrückt
@@ -30,7 +31,7 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
 | Zurück | eine Ebene zurück | Wiedergabe beenden |
 | △ | Suche (in der Quelle) / Einstellungen (Startseite) | – |
 | □ | Menü: gesehen/ungesehen, Favoriten, Playlists, Bearbeiten | – |
-| ▲ / ▼ (Steuerkreuz) | Auswahl | zweimal drücken: vorheriger / nächster Eintrag (Senderwechsel, nächste Folge) |
+| ▲ / ▼ (Steuerkreuz) | Auswahl | vorheriger / nächster Eintrag (Senderwechsel, nächste Folge) |
 | SELECT | – | technische Infos (Decoder, Puffer) |
 | L / R | seitenweise blättern | ±60 s |
 | ◀ / ▶ | DNS-Preset wechseln (Einstellungen) | ±10 s |

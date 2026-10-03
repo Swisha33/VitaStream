@@ -12,7 +12,7 @@ NetStats g_net_stats;
 VsConfig g_cfg;
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %d: %s\n", __LINE__, #c); fails++; } } while (0)
-static char last_post[4096], last_headers[512];
+static char last_post[4096], last_headers[512], last_url[2048];
 
 static int reply(NetBuf *out, const char *s) { out->data = strdup(s); out->len = strlen(s); return NET_OK; }
 
@@ -93,12 +93,53 @@ static int jelly_reply(const char *url, const char *post, NetBuf *out, long *sta
     return reply(out, "{}");
 }
 
+/* --- simulierte Website fuer den Explorer --- */
+static int explorer_reply(const char *url, const char *post, NetBuf *out) {
+    /* Startseite mit Suchformular und Inhaltslinks */
+    if (!strcmp(url, "https://kino.example/"))
+        return reply(out, "<html><head><title>Kino</title></head><body>"
+            "<form role='search' action='/suche' method='get'><input type='text' name='q'></form>"
+            "<a href='/film/matrix'><img src='/img/m.jpg' alt='Matrix'>Matrix</a>"
+            "<a href='/film/avatar'>Avatar (2009)</a>"
+            "<a href='/impressum'>Impressum</a>"
+            "<a href='https://fremd.example/x'>Fremd</a></body></html>");
+    if (strstr(url, "kino.example/suche?") || (post && strstr(url, "kino.example")))
+        return reply(out, "<html><body>"
+            "<a href='/film/matrix'>Matrix</a><a href='/film/matrix-reloaded'>Matrix Reloaded</a>"
+            "<a href='/film/avatar'>Avatar</a><a href='/impressum'>Impressum</a></body></html>");
+    if (!strcmp(url, "https://kino.example/film/matrix"))
+        return reply(out, "<html><head><meta property='og:title' content='Matrix'>"
+            "<meta property='og:image' content='/img/matrix.jpg'></head><body>"
+            "<iframe src='https://archive.org/embed/matrix1999'></iframe>"
+            "<div class='mirror' data-src='https://voe.example/e/abcd'>Hoster 2</div>"
+            "<a href='/film/matrix-staffel-nix'>x</a></body></html>");
+    /* offener Hoster (archive.org) */
+    if (strstr(url, "archive.org/metadata/matrix1999"))
+        return reply(out, "{\"files\":[{\"name\":\"matrix_512kb.mp4\",\"size\":\"5000\"},"
+            "{\"name\":\"matrix.mp4\",\"size\":\"90000\"},{\"name\":\"cover.jpg\",\"size\":\"10\"}]}");
+    /* verschleierter Hoster: kein offener Videolink */
+    if (strstr(url, "voe.example/e/abcd"))
+        return reply(out, "<html><body><script>eval(atob('...'))</script></body></html>");
+    return NET_ERR;
+}
+
 int net_request(const char *url, const char *post, const char *hdr, NetBuf *out, long *status, char *final_url, int fl) {
     memset(out, 0, sizeof *out);
     if (status) *status = 200;
     if (final_url) snprintf(final_url, fl, "%s", url);
     snprintf(last_headers, sizeof last_headers, "%s", hdr ? hdr : "");
     if (net_check_url(url) == NET_BLOCKED) return NET_BLOCKED;
+    if (strstr(url, "archive.org/advancedsearch.php")) {
+        snprintf(last_url, sizeof last_url, "%s", url);
+        return reply(out, "{\"response\":{\"numFound\":2,\"docs\":["
+            "{\"identifier\":\"notld\",\"title\":\"Night of the Living Dead\",\"year\":\"1968\"},"
+            "{\"identifier\":\"his_girl\",\"title\":[\"His Girl Friday\"]}]}}");
+    }
+    if (strstr(url, "archive.org/metadata/notld"))
+        return reply(out, "{\"files\":[{\"name\":\"notld.ogv\",\"size\":\"100\"},"
+            "{\"name\":\"notld_512kb.mp4\",\"size\":\"3000\"},{\"name\":\"notld.mp4\",\"size\":\"90000\"}]}");
+    if (strstr(url, "kino.example") || strstr(url, "archive.org") || strstr(url, "voe.example"))
+        return explorer_reply(url, post, out);
     if (strstr(url, "jelly.example")) return jelly_reply(url, post, out, status);
     if (strstr(url, "mediathekviewweb")) {
         snprintf(last_post, sizeof last_post, "%s", post ? post : "");
@@ -227,7 +268,24 @@ int main(void) {
 
     /* ---------- Mediathek: Suche-Eintrag, Sender -> Kategorien, Reihen-Ordner, Seiten ---------- */
     int m = find_src("Mediathek"); CHECK(m >= 0);
-    CHECK(browse(m, NULL, &l) == 0 && l.count > 10 && l.items[0].kind == ITEM_SEARCH && l.items[1].kind == ITEM_FOLDER);
+    CHECK(browse(m, NULL, &l) == 0 && l.count >= 4 && l.items[0].kind == ITEM_SEARCH && find_item(&l, "Deutsch") == 1);
+    CHECK(find_item(&l, "English") >= 0 && find_item(&l, "Kroatisch") >= 0);
+    plugins_list_free(&l);
+    /* englische Mediathek: Internet Archive, Kategorie + Wiedergabe + Suche */
+    CHECK(browse(m, "lang:en", &l) == 0 && l.items[0].kind == ITEM_SEARCH && find_item(&l, "Dokumentationen") > 0);
+    char ia_cat[64]; snprintf(ia_cat, sizeof ia_cat, "%s", l.count > 1 ? l.items[1].id : "");
+    plugins_list_free(&l);
+    CHECK(browse(m, ia_cat, &l) == 0 && l.count == 2 && !strcmp(l.items[0].title, "Night of the Living Dead"));
+    CHECK(strstr(last_url, "advancedsearch.php") && strstr(last_url, "English"));
+    if (l.count) {
+        CHECK(l.items[0].thumb && strstr(l.items[0].thumb, "archive.org/services/img/notld"));
+        CHECK(resolve(m, &l.items[0], &si) == 0 && !strcmp(si.url, "https://archive.org/download/notld/notld_512kb.mp4"));
+    }
+    plugins_list_free(&l);
+    CHECK(search_ctx(m, "zombie", "iasearch:hr", &l) == 0 && l.count >= 1);
+    CHECK(strstr(last_url, "Croatian") && strstr(last_url, "zombie"));
+    plugins_list_free(&l);
+    CHECK(browse(m, "lang:de", &l) == 0 && l.count > 10 && l.items[0].kind == ITEM_SEARCH);
     int zdf = find_item(&l, "ZDF");
     char zid[64]; snprintf(zid, sizeof zid, "%s", zdf >= 0 ? l.items[zdf].id : "");
     plugins_list_free(&l);
@@ -449,6 +507,38 @@ int main(void) {
     plugins_list_free(&l);
     /* Suche auf dem Server */
     CHECK(search(jf, "hevc", &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Film HEVC"));
+    plugins_list_free(&l);
+
+    /* ---------- Website-Explorer ---------- */
+    int ex = find_src("Explorer"); CHECK(ex >= 0);
+    /* Website oeffnen: Such-Eintrag (Formular erkannt) + Inhaltslinks */
+    CHECK(search(ex, "kino.example", &l) == 0 && l.count >= 3 && l.items[0].kind == ITEM_SEARCH);
+    CHECK(strstr(l.items[0].id, "site:https://kino.example/") != NULL);
+    CHECK(strstr(l.items[0].subtitle, "erkannt") != NULL);
+    char site_ctx[200]; snprintf(site_ctx, sizeof site_ctx, "%s", l.items[0].id);
+    CHECK(find_item(&l, "Matrix") >= 0 && find_item(&l, "Avatar") >= 0 && find_item(&l, "Impressum") < 0);
+    plugins_list_free(&l);
+    /* auf der Seite suchen: Top-5 Treffer, Startseiten-Navlinks gefiltert */
+    CHECK(search_ctx(ex, "matrix", site_ctx, &l) == 0 && l.count >= 2);
+    CHECK(find_item(&l, "Matrix Reloaded") >= 0 && find_item(&l, "Impressum") < 0);
+    printf("  Explorer Treffer fuer 'matrix': %d (erster: %s)\n", l.count, l.count ? l.items[0].title : "-");
+    CHECK(l.count && !strcmp(l.items[0].title, "Matrix"));   /* exakter Treffer vorn */
+    char page_id[200]; snprintf(page_id, sizeof page_id, "%s", l.items[0].id);
+    plugins_list_free(&l);
+    /* Detailseite oeffnen: offener Hoster + verschleierter Hoster gelistet */
+    CHECK(browse(ex, page_id, &l) == 0 && l.count >= 2);
+    for (int i = 0; i < l.count; i++) printf("    - %s | %s\n", l.items[i].title, l.items[i].subtitle);
+    int arch = -1, voe = -1;
+    for (int i = 0; i < l.count; i++) {
+        if (strstr(l.items[i].id, "archive.org/embed/matrix1999")) arch = i;
+        if (strstr(l.items[i].id, "voe.example")) voe = i;
+    }
+    CHECK(arch >= 0 && voe >= 0);
+    /* offener Hoster: kleinste MP4-Ableitung wird aufgeloest */
+    if (arch >= 0) CHECK(resolve(ex, &l.items[arch], &si) == 0 && !strcmp(si.url, "https://archive.org/download/matrix1999/matrix_512kb.mp4"));
+    /* verschleierter Hoster: keine Unterstuetzung, klare Meldung */
+    if (voe >= 0) { plugins_start_resolve(ex, &l.items[voe]); CHECK(wait_job() == JOB_ERROR);
+        printf("  verschleierter Hoster -> %s\n", plugins_job_error()); plugins_job_reset(); }
     plugins_list_free(&l);
 
     CHECK(plugins_reload() == n);

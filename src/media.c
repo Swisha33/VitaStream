@@ -307,6 +307,19 @@ static void pos_reset(int64_t base, int64_t anchor)
     pthread_mutex_unlock(&M.fm);
 }
 
+/* Alle dekodierten Bilder verwerfen (nach einem Sprung): sonst verankern die alten
+   Zeitstempel die Positionsanzeige und sie springt auf 0, sobald die neuen Bilder kommen. */
+static void frames_flush(void)
+{
+    pthread_mutex_lock(&M.fm);
+    for (int i = 0; i < MEDIA_SLOTS; i++)
+        if (M.slot[i].st != FS_DECODING) M.slot[i].st = FS_FREE;
+    M.shown = -1;
+    M.wait_since = 0;
+    pthread_cond_broadcast(&M.fcv);
+    pthread_mutex_unlock(&M.fm);
+}
+
 static int audio_is_master(void) { return M.ai >= 0 && !M.audio_failed; }
 
 /* ================================================================ AVIO */
@@ -908,6 +921,7 @@ static void do_seek(void)
     pthread_mutex_unlock(&M.cm);
     pq_flush(&M.vq);
     pq_flush(&M.aq);
+    frames_flush();           /* dekodierte Bilder der alten Position verwerfen */
     M.eof = 0;
     if (M.bsf) av_bsf_flush(M.bsf);
 
