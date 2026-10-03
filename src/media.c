@@ -170,6 +170,13 @@ static struct {
     Hls            *hls;
     AVFormatContext *fmt;
     AVIOContext    *avio;
+    /* separate Tonspur (HLS EXT-X-MEDIA) */
+    Hls            *ahls;
+    AVFormatContext *afmt;
+    AVIOContext    *aavio;
+    int             split;
+    int             v_eof, a_eof;
+    int64_t         last_vts, last_ats;   /* µs, zuletzt gelesen */
 
     /* Streams */
     int             vi, ai;
@@ -267,10 +274,10 @@ static int audio_is_master(void) { return M.ai >= 0 && !M.audio_failed; }
 
 static int io_read(void *opaque, uint8_t *buf, int size)
 {
-    (void)opaque;
     if (M.abort) return AVERROR_EXIT;
-    if (M.hls) {
-        int n = hls_read(M.hls, buf, size);
+    Hls *hl = opaque ? (Hls *)opaque : M.hls;   /* opaque = Tonspur-Playlist */
+    if (hl) {
+        int n = hls_read(hl, buf, size);
         if (n == 0) return AVERROR_EOF;
         if (n < 0) return M.abort ? AVERROR_EXIT : AVERROR(EIO);
         return n;
@@ -337,6 +344,51 @@ static int open_format(char *err, int errlen)
         snprintf(err, errlen, "Streaminformationen nicht lesbar");
         return -1;
     }
+    return 0;
+}
+
+/* Separate Tonspur öffnen (eigener Demuxer auf eigener HLS-Playlist) */
+static int open_audio_format(char *err, int errlen)
+{
+    M.afmt = avformat_alloc_context();
+    M.afmt->interrupt_callback.callback = io_interrupt;
+    uint8_t *iobuf = av_malloc(IO_BUF_SIZE);
+    M.aavio = avio_alloc_context(iobuf, IO_BUF_SIZE, 0, M.ahls, io_read, NULL, NULL);
+    M.aavio->seekable = 0;
+    M.afmt->pb = M.aavio;
+    M.afmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "probesize", "500000", 0);
+    av_dict_set(&opts, "analyzeduration", "2000000", 0);
+    int r = avformat_open_input(&M.afmt, NULL, NULL, &opts);
+    av_dict_free(&opts);
+    if (r < 0 || avformat_find_stream_info(M.afmt, NULL) < 0) {
+        snprintf(err, errlen, "Tonspur nicht lesbar: %s", hls_error(M.ahls));
+        return -1;
+    }
+    return 0;
+}
+
+static void close_audio_format(void)
+{
+    if (M.afmt) avformat_close_input(&M.afmt);
+    if (M.aavio) {
+        av_freep(&M.aavio->buffer);
+        avio_context_free(&M.aavio);
+    }
+}
+
+static int open_audio_decoder(AVStream *st)
+{
+    const AVCodec *c = avcodec_find_decoder(st->codecpar->codec_id);
+    if (!c) return -1;
+    AVCodecContext *ctx = avcodec_alloc_context3(c);
+    avcodec_parameters_to_context(ctx, st->codecpar);
+    ctx->pkt_timebase = st->time_base;
+    if (avcodec_open2(ctx, c, NULL) < 0) { avcodec_free_context(&ctx); return -1; }
+    avcodec_free_context(&M.actx);
+    M.actx = ctx;
+    M.atb = st->time_base;
     return 0;
 }
 
@@ -718,6 +770,28 @@ static int open_source(char *err, int errlen)
     if (open_format(err, errlen) < 0) return -1;
     if (setup_streams(err, errlen) < 0) return -1;
 
+    /* HLS mit separater Tonspur (z. B. Paramount/South Park): zweiten Demuxer öffnen */
+    if (M.hls && hls_audio_url(M.hls)) {
+        char aerr[200];
+        M.ahls = hls_open(hls_audio_url(M.hls), M.headers, &M.abort, aerr, sizeof aerr);
+        if (M.ahls && open_audio_format(aerr, sizeof aerr) == 0) {
+            int ai = av_find_best_stream(M.afmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+            if (ai >= 0 && open_audio_decoder(M.afmt->streams[ai]) == 0) {
+                M.ai = ai;
+                M.split = 1;
+                for (unsigned i = 0; i < M.fmt->nb_streams; i++)
+                    if ((int)i != M.vi) M.fmt->streams[i]->discard = AVDISCARD_ALL;
+                for (unsigned i = 0; i < M.afmt->nb_streams; i++)
+                    if ((int)i != ai) M.afmt->streams[i]->discard = AVDISCARD_ALL;
+            }
+        }
+        if (!M.split) {
+            close_audio_format();
+            hls_close(M.ahls);
+            M.ahls = NULL;
+        }
+    }
+
     M.live = M.hls ? hls_is_live(M.hls) : 0;
     M.duration = M.hls ? hls_duration_us(M.hls) : (M.fmt->duration > 0 ? M.fmt->duration : 0);
     M.origin = M.fmt->start_time != AV_NOPTS_VALUE ? M.fmt->start_time : 0;
@@ -728,8 +802,10 @@ static int open_source(char *err, int errlen)
         snprintf(vinfo, sizeof vinfo, "H.264 %dx%d", cp->width, cp->height);
     }
     if (M.ai >= 0) {
-        AVCodecParameters *cp = M.fmt->streams[M.ai]->codecpar;
-        snprintf(ainfo, sizeof ainfo, "%s %d Hz", avcodec_get_name(cp->codec_id), cp->sample_rate);
+        AVCodecParameters *cp = (M.split ? M.afmt : M.fmt)->streams[M.ai]->codecpar;
+        snprintf(ainfo, sizeof ainfo, "%s %d Hz%s%s", avcodec_get_name(cp->codec_id), cp->sample_rate,
+                 M.split ? " (eigene Spur " : "", M.split ? (hls_audio_lang(M.hls)[0] ? hls_audio_lang(M.hls) : "?") : "");
+        if (M.split) strncat(ainfo, ")", sizeof ainfo - strlen(ainfo) - 1);
     }
     snprintf(M.info, sizeof M.info, "%s | %s | %s", M.hls ? "HLS" : (M.ns ? "HTTP" : "Datei"),
              vinfo, ainfo);
@@ -789,6 +865,8 @@ static void do_seek(void)
     M.eof = 0;
     if (M.bsf) av_bsf_flush(M.bsf);
 
+    M.v_eof = M.a_eof = 0;
+    M.last_vts = M.last_ats = 0;
     if (M.hls) {
         close_format();
         hls_seek(M.hls, target);
@@ -796,9 +874,20 @@ static void do_seek(void)
         if (open_format(err, sizeof err) < 0) { set_error("%s", err); return; }
         /* Stream-Indizes nach dem Neuöffnen erneut bestimmen */
         int vi = av_find_best_stream(M.fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-        int ai = av_find_best_stream(M.fmt, AVMEDIA_TYPE_AUDIO, -1, vi, NULL, 0);
         if (M.vi >= 0) { M.vi = vi; if (vi >= 0) M.vtb = M.fmt->streams[vi]->time_base; }
-        if (M.ai >= 0) { M.ai = ai; if (ai >= 0) M.atb = M.fmt->streams[ai]->time_base; }
+        if (M.split) {
+            for (unsigned i = 0; i < M.fmt->nb_streams; i++)
+                if ((int)i != M.vi) M.fmt->streams[i]->discard = AVDISCARD_ALL;
+            close_audio_format();
+            hls_seek(M.ahls, target);
+            if (open_audio_format(err, sizeof err) < 0) { set_error("%s", err); return; }
+            int ai = av_find_best_stream(M.afmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+            M.ai = ai;
+            if (ai >= 0) M.atb = M.afmt->streams[ai]->time_base;
+        } else {
+            int ai = av_find_best_stream(M.fmt, AVMEDIA_TYPE_AUDIO, -1, vi, NULL, 0);
+            if (M.ai >= 0) { M.ai = ai; if (ai >= 0) M.atb = M.fmt->streams[ai]->time_base; }
+        }
     } else {
         av_seek_frame(M.fmt, -1, M.origin + target, AVSEEK_FLAG_BACKWARD);
     }
@@ -828,7 +917,40 @@ static void *demux_thread(void *arg)
         int a_enough = M.ai < 0 || pq_count(&M.aq) > ENOUGH_PACKETS;
         if (bytes > MAX_QUEUE_BYTES || (v_enough && a_enough) || M.eof) { usleep(10000); continue; }
 
-        int r = av_read_frame(M.fmt, pkt);
+        /* Bei separater Tonspur aus der Quelle lesen, die zeitlich zurückliegt */
+        AVFormatContext *src = M.fmt;
+        int from_audio = 0;
+        if (M.split) {
+            if (!M.afmt) { usleep(20000); continue; }
+            int audio_full = pq_count(&M.aq) > 2 * ENOUGH_PACKETS;
+            from_audio = !M.a_eof && (M.v_eof || (M.last_ats <= M.last_vts && !audio_full));
+            src = from_audio ? M.afmt : M.fmt;
+        }
+        int r = av_read_frame(src, pkt);
+        if (r < 0 && M.split) {
+            if (M.abort) break;
+            if (from_audio) M.a_eof = 1; else M.v_eof = 1;
+            if (M.a_eof && M.v_eof) {
+                pq_put(&M.vq, NULL, M.serial);
+                pq_put(&M.aq, NULL, M.serial);
+                M.eof = 1;
+            }
+            continue;
+        }
+        if (M.split && pkt->dts != AV_NOPTS_VALUE) {
+            int64_t t = av_rescale_q(pkt->dts, src->streams[pkt->stream_index]->time_base, (AVRational){1, 1000000});
+            if (from_audio) M.last_ats = t; else M.last_vts = t;
+        }
+        if (from_audio) {
+            if (pkt->stream_index == M.ai) {
+                AVPacket *o = av_packet_alloc();
+                av_packet_move_ref(o, pkt);
+                pq_put(&M.aq, o, M.serial);
+            } else {
+                av_packet_unref(pkt);
+            }
+            continue;
+        }
         if (r < 0) {
             if (M.abort) break;
             if (r == AVERROR_EOF || avio_feof(M.fmt->pb) || ++read_errors > 3) {
@@ -852,7 +974,7 @@ static void *demux_thread(void *arg)
             } else {
                 av_packet_unref(pkt);
             }
-        } else if (pkt->stream_index == M.ai) {
+        } else if (!M.split && pkt->stream_index == M.ai) {
             AVPacket *o = av_packet_alloc();
             av_packet_move_ref(o, pkt);
             pq_put(&M.aq, o, M.serial);
@@ -910,6 +1032,8 @@ void media_close(void)
     pq_flush(&M.vq);
     pq_flush(&M.aq);
     close_format();
+    close_audio_format();
+    hls_close(M.ahls);
     av_bsf_free(&M.bsf);
     avcodec_free_context(&M.actx);
     swr_free(&M.swr);

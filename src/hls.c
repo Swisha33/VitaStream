@@ -38,6 +38,8 @@ struct Hls {
     NetBuf    buf;
     size_t    pos;
     char      info[96];
+    char     *audio_url;         /* separate Tonspur (EXT-X-MEDIA TYPE=AUDIO) */
+    char      audio_lang[16];
     char      err[160];
     char     *cur_key_uri;       /* beim Parsen gültiger Schlüssel */
     uint8_t   cur_iv[16];
@@ -159,7 +161,42 @@ static int parse_iv(const char *v, uint8_t out[16])
 
 /* ---------------------------------------------------------------- Master */
 
-typedef struct { char uri[2048]; long bw; int w, h; int ok; } Variant;
+typedef struct { char uri[2048]; long bw; int w, h; int ok; char audio[64]; } Variant;
+
+/* Separate Tonspur für eine AUDIO-Gruppe wählen: Deutsch > DEFAULT=YES > erste */
+static void choose_audio(Hls *h, const char *text, const char *base, const char *group)
+{
+    int best_score = -1;
+    char best_uri[2048] = "", best_lang[16] = "";
+    const char *p = text;
+    while (*p) {
+        const char *eol = p + strcspn(p, "\r\n");
+        if (!strncmp(p, "#EXT-X-MEDIA:", 13)) {
+            char line[2048], v[2048];
+            snprintf(line, sizeof line, "%.*s", (int)(eol - p), p + 13);
+            if (attr(line, "TYPE", v, sizeof v) && !strcmp(v, "AUDIO") &&
+                attr(line, "GROUP-ID", v, sizeof v) && !strcmp(v, group)) {
+                char lang[16] = "";
+                attr(line, "LANGUAGE", lang, sizeof lang);
+                for (char *c = lang; *c; c++) *c = (char)tolower((unsigned char)*c);
+                int score = 0;
+                if (!strncmp(lang, "de", 2) || !strcmp(lang, "ger")) score += 4;
+                if (attr(line, "DEFAULT", v, sizeof v) && !strcmp(v, "YES")) score += 2;
+                int has_uri = attr(line, "URI", v, sizeof v) != NULL;
+                if (score > best_score) {
+                    best_score = score;
+                    if (has_uri) hls_join_url(base, v, best_uri, sizeof best_uri);
+                    else best_uri[0] = 0;      /* Ton steckt im Videostream */
+                    snprintf(best_lang, sizeof best_lang, "%s", lang);
+                }
+            }
+        }
+        p = eol + strspn(eol, "\r\n");
+    }
+    free(h->audio_url);
+    h->audio_url = best_uri[0] ? strdup(best_uri) : NULL;
+    snprintf(h->audio_lang, sizeof h->audio_lang, "%s", best_lang);
+}
 
 static int choose_variant(Hls *h, const char *text, const char *base, char *out, int outlen)
 {
@@ -175,6 +212,7 @@ static int choose_variant(Hls *h, const char *text, const char *base, char *out,
             cand.bw = attr(line, "BANDWIDTH", v, sizeof v) ? atol(v) : 0;
             if (attr(line, "RESOLUTION", v, sizeof v)) sscanf(v, "%dx%d", &cand.w, &cand.h);
             cand.ok = 1;
+            if (attr(line, "AUDIO", v, sizeof v)) snprintf(cand.audio, sizeof cand.audio, "%s", v);
             if (attr(line, "CODECS", v, sizeof v)) {
                 for (char *c = v; *c; c++) *c = (char)tolower((unsigned char)*c);
                 if (strstr(v, "hvc1") || strstr(v, "hev1") || strstr(v, "av01") || strstr(v, "vp09"))
@@ -211,6 +249,7 @@ static int choose_variant(Hls *h, const char *text, const char *base, char *out,
     }
     Variant *v = best.uri[0] ? &best : &fallback;
     snprintf(out, outlen, "%s", v->uri);
+    if (v->audio[0]) choose_audio(h, text, base, v->audio);
     if (v->h) snprintf(h->info, sizeof h->info, "%dx%d, %.1f Mbit/s", v->w, v->h, v->bw / 1e6);
     else      snprintf(h->info, sizeof h->info, "%.1f Mbit/s", v->bw / 1e6);
     return 0;
@@ -376,6 +415,7 @@ void hls_close(Hls *h)
     free(h->headers);
     free(h->cur_key_uri);
     free(h->key_cache_uri);
+    free(h->audio_url);
     net_buf_free(&h->buf);
     free(h);
 }
@@ -524,4 +564,6 @@ int64_t hls_seek(Hls *h, int64_t time_us)
 }
 
 const char *hls_info(const Hls *h)  { return h->info; }
+const char *hls_audio_url(const Hls *h) { return h->audio_url; }
+const char *hls_audio_lang(const Hls *h) { return h->audio_lang; }
 const char *hls_error(const Hls *h) { return h->err; }

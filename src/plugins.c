@@ -51,6 +51,18 @@ static int l_http(lua_State *ls, int is_post)
 static int l_http_get(lua_State *ls)  { return l_http(ls, 0); }
 static int l_http_post(lua_State *ls) { return l_http(ls, 1); }
 
+/* vs.probe(url [, headers]) -> ok, info : prüft, ob ein Stream antwortet (lädt nur den Anfang) */
+static int l_probe(lua_State *ls)
+{
+    const char *url = luaL_checkstring(ls, 1);
+    const char *hdr = luaL_optstring(ls, 2, NULL);
+    char info[160];
+    int ok = net_probe(url, hdr, 10, info, sizeof info);
+    lua_pushboolean(ls, ok);
+    lua_pushstring(ls, info);
+    return 2;
+}
+
 static int l_is_blocked(lua_State *ls)
 {
     lua_pushboolean(ls, net_check_url(luaL_checkstring(ls, 1)) == NET_BLOCKED);
@@ -170,6 +182,19 @@ static int l_write_file(lua_State *ls)
     return 1;
 }
 
+/* vs.delete_file(name) – nur eigene Dateien im Datenordner (keine Plugins/Einstellungen) */
+static int l_delete_file(lua_State *ls)
+{
+    const char *name = luaL_checkstring(ls, 1);
+    if (strstr(name, "..") || strchr(name, ':') || strchr(name, '/') || strchr(name, '\\')
+        || !strcmp(name, "config.ini") || !strcmp(name, "playlists.txt") || !strcmp(name, "cacert.pem"))
+        return luaL_error(ls, "ungueltiger Dateiname");
+    char path[256];
+    snprintf(path, sizeof path, VS_DATA_DIR "/%s", name);
+    lua_pushboolean(ls, remove(path) == 0);
+    return 1;
+}
+
 static int l_log(lua_State *ls)
 {
     snprintf(s_log, sizeof s_log, "%s", luaL_checkstring(ls, 1));
@@ -183,10 +208,12 @@ static const luaL_Reg vs_funcs[] = {
     {"http_get",      l_http_get},
     {"http_post",     l_http_post},
     {"is_blocked",    l_is_blocked},
+    {"probe",         l_probe},
     {"urlencode",     l_urlencode},
     {"html_unescape", l_html_unescape},
     {"read_file",     l_read_file},
     {"write_file",    l_write_file},
+    {"delete_file",   l_delete_file},
     {"log",           l_log},
     {NULL, NULL}
 };
@@ -322,7 +349,7 @@ static int load_all(void)
 
 /* ======================= Worker ======================= */
 
-typedef enum { OP_SEARCH, OP_BROWSE, OP_RESOLVE } Op;
+typedef enum { OP_SEARCH, OP_BROWSE, OP_RESOLVE, OP_ACTION } Op;
 
 static struct {
     pthread_t       thread;
@@ -334,10 +361,13 @@ static struct {
     Op              op;
     int             src;
     char           *arg;
+    char           *arg2;
     int             item_ref;
     PluginList      list;
     StreamInfo      stream;
     char            err[256];
+    char            msg[256];
+    int             refresh;
 } W;
 
 static void set_error(const char *msg)
@@ -364,7 +394,8 @@ static void read_items(int idx, PluginList *out)
         copy_field(L, t, "id", buf, sizeof buf, "");                   it->id = strdup(buf);
         copy_field(L, t, "thumb", buf, sizeof buf, "");                it->thumb = buf[0] ? strdup(buf) : NULL;
         copy_field(L, t, "kind", buf, sizeof buf, "video");
-        it->kind = !strcmp(buf, "folder") ? ITEM_FOLDER : !strcmp(buf, "more") ? ITEM_MORE : ITEM_VIDEO;
+        it->kind = !strcmp(buf, "folder") ? ITEM_FOLDER : !strcmp(buf, "more") ? ITEM_MORE :
+                   !strcmp(buf, "search") ? ITEM_SEARCH : ITEM_VIDEO;
         it->ref = luaL_ref(L, LUA_REGISTRYINDEX);                      /* pop */
         out->count++;
     }
@@ -390,7 +421,8 @@ static void run_job(void)
 {
     pthread_mutex_lock(&s_lua_lock);
     int top = lua_gettop(L);
-    const char *fname = W.op == OP_SEARCH ? "search" : W.op == OP_BROWSE ? "browse" : "resolve";
+    const char *fname = W.op == OP_SEARCH ? "search" : W.op == OP_BROWSE ? "browse" :
+                         W.op == OP_ACTION ? "action" : "resolve";
 
     lua_rawgeti(L, LUA_REGISTRYINDEX, s_sources[W.src].ref);
     lua_getfield(L, -1, fname);
@@ -399,11 +431,17 @@ static void run_job(void)
         W.state = JOB_ERROR;
         goto out;
     }
-    if (W.op == OP_RESOLVE) lua_rawgeti(L, LUA_REGISTRYINDEX, W.item_ref);
+    int nargs = 1;
+    if (W.op == OP_ACTION) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, W.item_ref);
+        lua_pushstring(L, W.arg ? W.arg : "");
+        if (W.arg2) lua_pushstring(L, W.arg2); else lua_pushnil(L);
+        nargs = 3;
+    } else if (W.op == OP_RESOLVE) lua_rawgeti(L, LUA_REGISTRYINDEX, W.item_ref);
     else if (W.arg)          lua_pushstring(L, W.arg);
     else                     lua_pushnil(L);
 
-    if (lua_pcall(L, 1, 2, 0) != LUA_OK) {
+    if (lua_pcall(L, nargs, 2, 0) != LUA_OK) {
         set_error(lua_tostring(L, -1));
         W.state = JOB_ERROR;
         goto out;
@@ -415,7 +453,18 @@ static void run_job(void)
         goto out;
     }
 
-    if (W.op == OP_RESOLVE) {
+    if (W.op == OP_ACTION) {
+        W.msg[0] = 0;
+        W.refresh = 0;
+        if (lua_isstring(L, res)) {
+            snprintf(W.msg, sizeof W.msg, "%s", lua_tostring(L, res));
+        } else if (lua_istable(L, res)) {
+            copy_field(L, res, "message", W.msg, sizeof W.msg, "");
+            lua_getfield(L, res, "refresh");
+            W.refresh = lua_toboolean(L, -1);
+            lua_pop(L, 1);
+        }
+    } else if (W.op == OP_RESOLVE) {
         memset(&W.stream, 0, sizeof W.stream);
         if (lua_isstring(L, res)) {
             snprintf(W.stream.url, sizeof W.stream.url, "%s", lua_tostring(L, res));
@@ -456,12 +505,14 @@ static void *worker(void *arg)
     return NULL;
 }
 
-static int start(Op op, int src, const char *arg, int item_ref)
+static int start2(Op op, int src, const char *arg, const char *arg2, int item_ref)
 {
     if (W.state == JOB_RUNNING || src < 0 || src >= s_nsources) return -1;
     pthread_mutex_lock(&W.m);
     free(W.arg);
+    free(W.arg2);
     W.arg = arg ? strdup(arg) : NULL;
+    W.arg2 = arg2 ? strdup(arg2) : NULL;
     W.op = op;
     W.src = src;
     W.item_ref = item_ref;
@@ -472,6 +523,62 @@ static int start(Op op, int src, const char *arg, int item_ref)
     pthread_cond_signal(&W.cv);
     pthread_mutex_unlock(&W.m);
     return 0;
+}
+
+static int start(Op op, int src, const char *arg, int item_ref) { return start2(op, src, arg, NULL, item_ref); }
+
+int plugins_start_action(int src, const PluginItem *it, const char *action_id, const char *input)
+{
+    return start2(OP_ACTION, src, action_id, input, it->ref);
+}
+
+int plugins_take_action_result(char *msg, int msglen, int *refresh)
+{
+    if (W.state != JOB_DONE) return -1;
+    snprintf(msg, msglen, "%s", W.msg);
+    *refresh = W.refresh;
+    W.state = JOB_IDLE;
+    return 0;
+}
+
+/* Aktionen eines Eintrags abfragen (synchron, schnell; nur wenn kein Job läuft) */
+int plugins_item_actions(int src, const PluginItem *it, PluginAction *out, int max)
+{
+    if (W.state == JOB_RUNNING || src < 0 || src >= s_nsources || !L) return 0;
+    int n = 0;
+    pthread_mutex_lock(&s_lua_lock);
+    int top = lua_gettop(L);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, s_sources[src].ref);
+    lua_getfield(L, -1, "actions");
+    if (lua_isfunction(L, -1)) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, it->ref);
+        if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_istable(L, -1)) {
+            int t = lua_gettop(L);
+            int cnt = (int)lua_rawlen(L, t);
+            for (int i = 1; i <= cnt && n < max; i++) {
+                lua_rawgeti(L, t, i);
+                int a = lua_gettop(L);
+                if (lua_istable(L, a)) {
+                    PluginAction *pa = &out[n];
+                    memset(pa, 0, sizeof *pa);
+                    copy_field(L, a, "id", pa->id, sizeof pa->id, "");
+                    copy_field(L, a, "label", pa->label, sizeof pa->label, pa->id);
+                    copy_field(L, a, "input", pa->input, sizeof pa->input, "");
+                    copy_field(L, a, "default", pa->def, sizeof pa->def, "");
+                    lua_getfield(L, a, "confirm");
+                    pa->confirm = lua_toboolean(L, -1);
+                    lua_pop(L, 1);
+                    if (pa->id[0]) n++;
+                }
+                lua_pop(L, 1);
+            }
+        } else if (!lua_istable(L, -1)) {
+            snprintf(s_log, sizeof s_log, "actions: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
+        }
+    }
+    lua_settop(L, top);
+    pthread_mutex_unlock(&s_lua_lock);
+    return n;
 }
 
 int plugins_start_search(int src, const char *q)  { return start(OP_SEARCH, src, q, LUA_NOREF); }
@@ -563,6 +670,7 @@ void plugins_shutdown(void)
     pthread_join(W.thread, NULL);
     plugins_list_free(&W.list);
     free(W.arg);
+    free(W.arg2);
     if (L) lua_close(L);
     L = NULL;
 }

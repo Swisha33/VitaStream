@@ -20,6 +20,7 @@
 #define ITEM_VIDEO  0
 #define ITEM_FOLDER 1
 #define ITEM_MORE   2
+#define ITEM_SEARCH 3   /* "search": öffnet die Tastatur und startet search(text) */
 
 typedef struct {
     char *title;
@@ -73,6 +74,22 @@ int      plugins_take_list(PluginList *out);
 int      plugins_take_stream(StreamInfo *out);
 const char *plugins_job_error(void);
 void     plugins_job_reset(void);
+
+/* ---- Aktionen (Quadrat-Menü), vom Plugin über actions(item)/action(item, id, input) ----
+ *   actions = function(item) return { { id="del", label="Löschen", confirm=true },
+ *                                      { id="ren", label="Umbenennen", input="Neuer Name", default=item.title } } end
+ *   action  = function(item, id, input) return { message="...", refresh=true } end */
+typedef struct {
+    char id[32];
+    char label[96];
+    char input[96];    /* nicht leer: vorher Text abfragen (Titel der Tastatur) */
+    char def[256];     /* Vorgabetext */
+    int  confirm;      /* vorher "Wirklich?" fragen */
+} PluginAction;
+
+int  plugins_item_actions(int src, const PluginItem *it, PluginAction *out, int max);
+int  plugins_start_action(int src, const PluginItem *it, const char *action_id, const char *input);
+int  plugins_take_action_result(char *msg, int msglen, int *refresh);
 
 /* Log der letzten Plugin-Meldungen (vs.log) */
 const char *plugins_last_log(void);

@@ -212,9 +212,10 @@ return {
 
   browse = function(id)
     if id == nil then
-      local items = {}
+      local items = {
+        { title = "Adresse eingeben ...", subtitle = "Video-Link (MP4/M3U8) oder Website zum Durchsuchen", kind = "search" },
+      }
       for _, e in ipairs(load_history()) do items[#items + 1] = history_item(e) end
-      if #items == 0 then return nil, "Noch keine Adressen - mit Dreieck eine Video-URL oder Website eingeben" end
       return items
     end
     local site = id:match("^scan:(.+)$")

@@ -45,6 +45,9 @@ int  net_request_ex(const char *url, const char *post_body, const char *headers,
 /* Genauere Beschreibung des letzten Fehlers im aufrufenden Thread (curl-Text, Host ...) */
 const char *net_last_detail(void);
 
+/* Prüft, ob unter url ein Stream antwortet (lädt höchstens 8 KB). 1 = ok; info = Klartext */
+int  net_probe(const char *url, const char *headers, int timeout_s, char *info, int infolen);
+
 /* Prüft eine URL gegen Blockliste/DNS-Filter, ohne sie zu laden. */
 int  net_check_url(const char *url);
 

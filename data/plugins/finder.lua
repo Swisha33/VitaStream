@@ -62,6 +62,7 @@ return {
   browse = function(id)
     if id == nil then
       return {
+        { title = "Sender suchen ...", subtitle = "Name eines Senders, z. B. Pluto, Anime, Comedy", kind = "search" },
         folder("Zeichentrick & Anime", "list:categories/animation.m3u||0", "Animationssender weltweit"),
         folder("Deutschland", "list:countries/de.m3u||0", "Alle frei empfangbaren Sender aus DE"),
         folder("Oesterreich", "list:countries/at.m3u||0"),

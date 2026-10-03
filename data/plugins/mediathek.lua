@@ -90,18 +90,64 @@ local function to_item(r, show_channel)
 end
 
 -- Ergebnisliste + "Weitere laden"
-local function results_page(queries, offset, min_minutes, more_prefix, show_channel)
+local function results_page(queries, offset, min_minutes, more_prefix, show_channel, exact_topic)
   local res, total = query(queries, offset, PAGE, min_minutes)
   if not res then return nil, total end
   local items = {}
   for _, r in ipairs(res) do
-    local it = to_item(r, show_channel)
-    if it then items[#items + 1] = it end
+    -- Themen-Suche ist eine Teilwort-Suche: nur genau diese Sendereihe anzeigen
+    if not exact_topic or r.topic == exact_topic then
+      local it = to_item(r, show_channel)
+      if it then
+        if exact_topic then it.title = r.title end   -- Reihenname steht schon in der Kopfzeile
+        items[#items + 1] = it
+      end
+    end
   end
   local shown = offset + #res
   if #res == PAGE and (not total or shown < total) then
     items[#items + 1] = {
       title = total and string.format("Weitere laden (%d von %d)", shown, total) or "Weitere laden",
+      kind = "more", id = more_prefix .. shown,
+    }
+  end
+  if #items == 0 then return nil, "Keine Sendungen gefunden" end
+  return items
+end
+
+-- Wie results_page, aber Folgen derselben Sendereihe (Thema + Sender) in einem Ordner
+local GROUP_PAGE = 200
+local function grouped_page(queries, offset, min_minutes, more_prefix, show_channel)
+  local res, total = query(queries, offset, GROUP_PAGE, min_minutes)
+  if not res then return nil, total end
+  local order, groups = {}, {}
+  for _, r in ipairs(res) do
+    local key = (r.channel or "") .. "\1" .. (r.topic or "")
+    if not groups[key] then groups[key] = {}; order[#order + 1] = key end
+    table.insert(groups[key], r)
+  end
+  local items = {}
+  for _, key in ipairs(order) do
+    local g = groups[key]
+    local r = g[1]
+    if #g == 1 or not r.topic or #r.topic == 0 then
+      for _, x in ipairs(g) do
+        local it = to_item(x, show_channel)
+        if it then items[#items + 1] = it end
+      end
+    else
+      items[#items + 1] = {
+        title = r.topic, kind = "folder",
+        subtitle = string.format("%d Folgen  |  %s  |  neueste %s", #g, r.channel or "?", fmt_date(r.timestamp)),
+        id = "topic:" .. enc(r.channel or "") .. ":" .. enc(r.topic) .. ":0",
+        thumb = (r.url_website and #r.url_website > 0) and ("og:" .. r.url_website) or nil,
+      }
+    end
+  end
+  local shown = offset + #res
+  if #res == GROUP_PAGE and (not total or shown < total) then
+    items[#items + 1] = {
+      title = total and string.format("Weitere Sendungen laden (%d von %d Beitraegen)", shown, total) or "Weitere laden",
       kind = "more", id = more_prefix .. shown,
     }
   end
@@ -129,7 +175,10 @@ return {
 
   browse = function(id)
     if id == nil then
-      local items = { folder("Alle Sender", "ch:" .. enc(""), "Kategorien ueber alle Mediatheken") }
+      local items = {
+        { title = "Suchen ...", subtitle = "Sendung, Thema oder Titel in allen Mediatheken", kind = "search" },
+        folder("Alle Sender", "ch:" .. enc(""), "Kategorien ueber alle Mediatheken"),
+      }
       for _, ch in ipairs(CHANNELS) do items[#items + 1] = folder(ch, "ch:" .. enc(ch)) end
       return items
     end
@@ -148,14 +197,14 @@ return {
 
     local nch, noff = id:match("^new:(.-):(%d+)$")
     if nch then
-      return results_page(ch_query(dec(nch)), tonumber(noff), 2, "new:" .. nch .. ":", dec(nch) == "")
+      return grouped_page(ch_query(dec(nch)), tonumber(noff), 2, "new:" .. nch .. ":", dec(nch) == "")
     end
 
     local cch, ci, coff = id:match("^cat:(.-):(%d+):(%d+)$")
     if cch then
       local c = CATEGORIES[tonumber(ci)]
       local q = with(ch_query(dec(cch)), { fields = { "topic", "title", "description" }, query = c[2] })
-      return results_page(q, tonumber(coff), c[3], "cat:" .. cch .. ":" .. ci .. ":", dec(cch) == "")
+      return grouped_page(q, tonumber(coff), c[3], "cat:" .. cch .. ":" .. ci .. ":", dec(cch) == "")
     end
 
     -- Sendereihen aus den neuesten Beitraegen
@@ -183,20 +232,22 @@ return {
 
     local och, otopic, ooff = id:match("^topic:(.-):(.-):(%d+)$")
     if och then
-      local q = with(ch_query(dec(och)), { fields = { "topic" }, query = dec(otopic) })
-      return results_page(q, tonumber(ooff), 1, "topic:" .. och .. ":" .. otopic .. ":", false)
+      local topic = dec(otopic)
+      local q = with(ch_query(dec(och)), { fields = { "topic" }, query = topic })
+      local items, err = results_page(q, tonumber(ooff), 1, "topic:" .. och .. ":" .. otopic .. ":", false, topic)
+      return items, err
     end
 
     local sq, soff = id:match("^search:(.-):(%d+)$")
     if sq then
-      return results_page({ { fields = { "title", "topic" }, query = dec(sq) } }, tonumber(soff), 2,
+      return grouped_page({ { fields = { "title", "topic" }, query = dec(sq) } }, tonumber(soff), 2,
                           "search:" .. sq .. ":", true)
     end
     return nil, "Unbekannter Eintrag"
   end,
 
   search = function(text)
-    local items, err = results_page({ { fields = { "title", "topic" }, query = text } }, 0, 2,
+    local items, err = grouped_page({ { fields = { "title", "topic" }, query = text } }, 0, 2,
                                     "search:" .. enc(text) .. ":", true)
     if not items then return nil, err == "Keine Sendungen gefunden" and ("Nichts gefunden fuer: " .. text) or err end
     return items

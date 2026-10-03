@@ -24,6 +24,9 @@ int64_t hls_duration_us(const Hls *h);          /* 0 bei Live */
 int64_t hls_seek(Hls *h, int64_t time_us);
 const char *hls_info(const Hls *h);             /* z. B. "1280x720, 2.5 Mbit/s" */
 const char *hls_error(const Hls *h);
+/* Separate Tonspur der gewählten Qualität (Media-Playlist-URL) oder NULL, wenn der Ton im Videostream steckt */
+const char *hls_audio_url(const Hls *h);
+const char *hls_audio_lang(const Hls *h);
 
 /* --- intern, für Tests sichtbar --- */
 void    hls_join_url(const char *base, const char *ref, char *out, int outlen);

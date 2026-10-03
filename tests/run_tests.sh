@@ -23,4 +23,6 @@ cp ../data/*.txt ../data/*.ini "$D/" && cp ../data/plugins/*.lua "$D/plugins/"
 sed -i 's/^#\(\[Beispielseite\|start   = https:\/\/example.org\|search \|item    = <a class\|embed \|stream \|referer\)/\1/' "$D/sites.txt"
 echo "Test-Liste|https://test.example/liste.m3u" >> "$D/playlists.txt"
 echo "ads.adnet.example" >> "$D/blocklist.txt"
+echo "Lokal|file:lokal.m3u" >> "$D/playlists.txt"
+printf '#EXTM3U\n#EXTINF:-1 group-title="X",Eins\nhttps://ok.example/1.m3u8\n#EXTINF:-1,Zwei\nhttps://ok.example/2.m3u8\n#EXTINF:-1,Drei\nhttps://ok.example/3.m3u8\n#EXTINF:-1,Kaputt\nhttps://kaputt.example/4.m3u8\n' > "$D/lokal.m3u"
 cd run && ../test_plugins

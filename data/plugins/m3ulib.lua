@@ -38,6 +38,7 @@ function M.parse(text)
       if next(opts) then e.headers = opts end
       if e.logo == "" then e.logo = nil end
       entries[#entries + 1] = e
+      e.idx = #entries
       cur, opts = nil, {}
     end
   end
@@ -45,6 +46,8 @@ function M.parse(text)
 end
 
 -- Laedt eine Playlist (URL oder "file:name"), mit kleinem Cache fuer Online-Listen
+function M.forget(url) cache[url] = nil end
+
 function M.load(url)
   if url:match("^file:") then
     local text = vs.read_file(url:sub(6))
@@ -74,8 +77,48 @@ end
 function M.item(e, subtitle)
   return {
     title = e.title, subtitle = subtitle or e.group, thumb = e.logo,
-    id = e.url, kind = "video", url = e.url, headers = e.headers,
+    id = e.url, kind = "video", url = e.url, headers = e.headers, idx = e.idx,
   }
+end
+
+-- Header-Tabelle -> Text fuer vs.probe/vs.http_get
+function M.header_text(h)
+  if not h then return nil end
+  local t = {}
+  for k, v in pairs(h) do t[#t + 1] = k .. ": " .. v end
+  return table.concat(t, "\n")
+end
+
+-- Eintraege wieder als M3U-Text
+function M.serialize(entries)
+  local out = { "#EXTM3U" }
+  for _, e in ipairs(entries) do
+    local attrs = {}
+    if e.logo then attrs[#attrs + 1] = 'tvg-logo="' .. e.logo .. '"' end
+    if e.group and #e.group > 0 then attrs[#attrs + 1] = 'group-title="' .. e.group .. '"' end
+    out[#out + 1] = "#EXTINF:-1" .. (#attrs > 0 and (" " .. table.concat(attrs, " ")) or "") .. "," .. e.title
+    if e.headers then
+      if e.headers.Referer then out[#out + 1] = "#EXTVLCOPT:http-referrer=" .. e.headers.Referer end
+      if e.headers["User-Agent"] then out[#out + 1] = "#EXTVLCOPT:http-user-agent=" .. e.headers["User-Agent"] end
+    end
+    out[#out + 1] = e.url
+  end
+  return table.concat(out, "\n") .. "\n"
+end
+
+function M.save(file, entries)
+  return vs.write_file(file, M.serialize(entries))
+end
+
+-- Prueft alle Eintraege, liefert die funktionierenden und die Zahl der defekten
+function M.check_all(entries)
+  local alive, dead = {}, 0
+  for i, e in ipairs(entries) do
+    vs.log(string.format("Pruefe %d/%d: %s (%d defekt)", i, #entries, e.title, dead))
+    local ok = vs.probe(e.url, M.header_text(e.headers))
+    if ok then alive[#alive + 1] = e else dead = dead + 1 end
+  end
+  return alive, dead
 end
 
 -- Seitenweise Ausgabe: liefert Items ab offset, haengt "Weitere laden" an

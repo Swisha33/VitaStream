@@ -293,6 +293,75 @@ int net_request_ex(const char *url_in, const char *post_body, const char *header
     return result;
 }
 
+/* ---------------- Stream-Prüfung ---------------- */
+
+typedef struct { NetBuf b; size_t cap; } CapBuf;
+
+static size_t capped_write(char *ptr, size_t sz, size_t nm, void *ud)
+{
+    CapBuf *c = ud;
+    size_t n = sz * nm;
+    if (c->b.len >= c->cap) return 0;          /* genug gesehen -> Übertragung abbrechen */
+    size_t take = n < c->cap - c->b.len ? n : c->cap - c->b.len;
+    write_cb(ptr, 1, take, &c->b);
+    return take == n ? n : 0;
+}
+
+int net_probe(const char *url_in, const char *headers, int timeout_s, char *info, int infolen)
+{
+    char *url = strdup(url_in);
+    int ok = 0;
+    snprintf(info, infolen, "keine Antwort");
+    char hdr[1200];
+    snprintf(hdr, sizeof hdr, "%s%sRange: bytes=0-8191", headers ? headers : "", headers && *headers ? "\n" : "");
+
+    for (int hop = 0; hop <= MAX_REDIR; hop++) {
+        char resolve[300];
+        int pr = prepare_host(url, resolve, sizeof resolve);
+        if (pr != NET_OK) { snprintf(info, infolen, "%s", net_strerror(pr)); break; }
+        CURL *c = curl_easy_init();
+        if (!c) break;
+        common_opts(c, url);
+        curl_easy_setopt(c, CURLOPT_TIMEOUT, (long)timeout_s);
+        curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, (long)(timeout_s < 8 ? timeout_s : 8));
+        struct curl_slist *rl = NULL, *hl = build_headers(hdr);
+        if (resolve[0]) { rl = curl_slist_append(NULL, resolve); curl_easy_setopt(c, CURLOPT_RESOLVE, rl); }
+        if (hl) curl_easy_setopt(c, CURLOPT_HTTPHEADER, hl);
+        CapBuf cb = { {NULL, 0}, 8192 };
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, capped_write);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &cb);
+        g_net_stats.requests++;
+        CURLcode cr = curl_easy_perform(c);
+        long code = 0;
+        char *redir = NULL;
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+        curl_easy_getinfo(c, CURLINFO_REDIRECT_URL, &redir);
+        char *next = (code >= 300 && code < 400 && redir) ? strdup(redir) : NULL;
+        curl_slist_free_all(rl);
+        curl_slist_free_all(hl);
+        curl_easy_cleanup(c);
+        if (next) { free(url); url = next; net_buf_free(&cb.b); continue; }
+
+        int got = cb.b.len > 0;
+        if (cr != CURLE_OK && !(cr == CURLE_WRITE_ERROR && got)) {
+            snprintf(info, infolen, "%s", curl_easy_strerror(cr));
+        } else if (code >= 400) {
+            snprintf(info, infolen, "HTTP %ld", code);
+        } else if (!got) {
+            snprintf(info, infolen, "leere Antwort");
+        } else if (cb.b.len >= 7 && strstr(cb.b.data, "#EXTM3U") && !strstr(cb.b.data, "#EXT-X") && !strstr(cb.b.data, "#EXTINF")) {
+            snprintf(info, infolen, "leere Playlist");
+        } else {
+            ok = 1;
+            snprintf(info, infolen, "OK (HTTP %ld)", code);
+        }
+        net_buf_free(&cb.b);
+        break;
+    }
+    free(url);
+    return ok;
+}
+
 /* ---------------- Bereichs-Stream ---------------- */
 
 #define WINDOW (1024 * 1024)

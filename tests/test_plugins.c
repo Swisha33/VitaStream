@@ -23,6 +23,13 @@ int net_check_url(const char *url) {
 const char *net_strerror(int c) { return c == NET_BLOCKED ? "Durch AdBlock gesperrt" : "Netzwerkfehler"; }
 void net_buf_free(NetBuf *b) { free(b->data); b->data = NULL; b->len = 0; }
 const char *net_last_detail(void) { return ""; }
+int net_probe(const char *url, const char *headers, int timeout_s, char *info, int infolen)
+{
+    (void)headers; (void)timeout_s;
+    int ok = strstr(url, "kaputt") == NULL;
+    snprintf(info, infolen, ok ? "OK (HTTP 200)" : "HTTP 404");
+    return ok;
+}
 
 /* Mediathek: liefert "size" Treffer ab "offset", insgesamt 120 */
 static int mediathek_reply(const char *post, NetBuf *out)
@@ -107,9 +114,9 @@ int net_request(const char *url, const char *post, const char *hdr, NetBuf *out,
     /* South Park */
     if (strstr(url, "southpark.de/seasons/south-park?json=true"))
         return reply(out, "{\"children\":[{\"type\":\"SeasonSelector\",\"props\":{\"items\":["
-                          "{\"label\":\"Staffel 2\",\"url\":\"/seasons/south-park/b2/staffel-2\"},"
-                          "{\"label\":\"Staffel 1\",\"url\":\"/seasons/south-park/a1/staffel-1\"}]}}]}");
-    if (strstr(url, "southpark.de/seasons/south-park/a1/staffel-1?json=true"))
+                          "{\"label\":\"Staffel 2\",\"url\":\"/seasons/south-park/a1/staffel-2\"}]}},"
+                          "{\"type\":\"LineList\",\"props\":{\"items\":[{\"url\":\"/folgen/r1/south-park-rueckkehr-staffel-1-ep-1\",\"title\":\"Cartman und die Analsonde\"}]}}]}");
+    if (strstr(url, "southpark.de/seasons/south-park/a1/staffel-2?json=true"))
         return reply(out, "{\"children\":[{\"type\":\"LineList\",\"props\":{\"items\":["
                           "{\"url\":\"/folgen/x1/south-park-cartman-staffel-1-ep-1\",\"meta\":{\"header\":{\"title\":\"Cartman\"},\"subHeader\":\"Staffel 1 Ep 1\"},"
                           "\"media\":{\"image\":{\"url\":\"https://images.paramount.tech/uri/mgid:x1\"}}}],"
@@ -167,9 +174,9 @@ int main(void) {
                                        plugins_source(i)->has_search, plugins_source(i)->has_browse);
     PluginList l, l2; StreamInfo si;
 
-    /* ---------- Mediathek: Sender -> Kategorien, Seiten, Vorschaubilder ---------- */
+    /* ---------- Mediathek: Suche-Eintrag, Sender -> Kategorien, Reihen-Ordner, Seiten ---------- */
     int m = find_src("Mediathek"); CHECK(m >= 0);
-    CHECK(browse(m, NULL, &l) == 0 && l.count > 10 && l.items[0].kind == ITEM_FOLDER);
+    CHECK(browse(m, NULL, &l) == 0 && l.count > 10 && l.items[0].kind == ITEM_SEARCH && l.items[1].kind == ITEM_FOLDER);
     int zdf = find_item(&l, "ZDF");
     char zid[64]; snprintf(zid, sizeof zid, "%s", zdf >= 0 ? l.items[zdf].id : "");
     plugins_list_free(&l);
@@ -179,40 +186,97 @@ int main(void) {
     snprintf(top_id, sizeof top_id, "%s", l.items[1].id);
     snprintf(cat_id, sizeof cat_id, "%s", l.items[find_item(&l, "Filme")].id);
     plugins_list_free(&l);
-    CHECK(browse(m, new_id, &l) == 0 && l.count == 51 && l.items[50].kind == ITEM_MORE);
-    printf("  mediathek: %d Eintraege, letzter: %s | thumb=%s\n", l.count, l.items[50].title, l.items[0].thumb ? l.items[0].thumb : "-");
-    CHECK(l.items[0].thumb && !strncmp(l.items[0].thumb, "og:https://www.zdf.example/", 27));
-    /* Seite 2 und 3 anhängen */
-    for (int page = 0; page < 2; page++) {
+    /* Neueste: Folgen derselben Reihe stecken in einem Ordner */
+    CHECK(browse(m, new_id, &l) == 0 && l.count == 2 && l.items[0].kind == ITEM_FOLDER && l.items[1].kind == ITEM_FOLDER);
+    char series[200]; snprintf(series, sizeof series, "%s", l.count ? l.items[0].id : "");
+    if (l.count == 2) printf("  Reihen: %s (%s) | %s (%s)\n", l.items[0].title, l.items[0].subtitle, l.items[1].title, l.items[1].subtitle);
+    CHECK(l.count && l.items[0].thumb && !strncmp(l.items[0].thumb, "og:https://www.zdf.example/", 27));
+    plugins_list_free(&l);
+    /* Reihe öffnen: nur Folgen genau dieser Reihe, seitenweise */
+    CHECK(browse(m, series, &l) == 0 && l.count > 1 && l.items[l.count - 1].kind == ITEM_MORE);
+    for (int page = 0; page < 3 && l.count && l.items[l.count - 1].kind == ITEM_MORE; page++) {
         int mi = l.count - 1;
-        if (l.items[mi].kind != ITEM_MORE) break;
         CHECK(browse(m, l.items[mi].id, &l2) == 0);
         plugins_list_append(&l, &l2, mi);
     }
-    printf("  mediathek nach 'Weitere laden': %d Eintraege\n", l.count);
-    CHECK(l.count == 120 && l.items[119].kind == ITEM_VIDEO);
+    int wrong = 0;
+    for (int i = 0; i < l.count; i++) if (strstr(l.items[i].title, "Folge") == NULL) wrong++;
+    printf("  Reihe '%s': %d Folgen nach allen Seiten, erste: %s\n", series, l.count, l.count ? l.items[0].title : "-");
+    CHECK(l.count == 40 && wrong == 0 && l.items[l.count - 1].kind == ITEM_VIDEO);
     plugins_list_free(&l);
-    CHECK(browse(m, cat_id, &l) == 0 && l.count == 51);
+    CHECK(browse(m, cat_id, &l) == 0 && l.count == 2);
     CHECK(strstr(last_post, "\"query\":\"film\"") && strstr(last_post, "\"duration_min\":4200") && strstr(last_post, "\"query\":\"ZDF\""));
     plugins_list_free(&l);
     CHECK(browse(m, top_id, &l) == 0 && l.count == 2 && l.items[0].kind == ITEM_FOLDER);
-    if (l.count == 2) printf("  Sendungen: %s (%s), %s\n", l.items[0].title, l.items[0].subtitle, l.items[1].title);
     plugins_list_free(&l);
-    CHECK(search(m, "Römer", &l) == 0 && l.count == 51);
-    if (l.count) { CHECK(resolve(m, &l.items[0], &si) == 0 && !strcmp(si.url, "https://zdf.example/v0.mp4")); }
+    CHECK(search(m, "Römer", &l) == 0 && l.count == 2);
     plugins_list_free(&l);
 
-    /* ---------- M3U-Playlists: Logos, Header ---------- */
+    /* ---------- M3U-Playlists: Logos, Header, Bearbeiten ---------- */
     int p = find_src("M3U"); CHECK(p >= 0);
-    CHECK(browse(p, NULL, &l) == 0 && l.count >= 2);
-    int ti = find_item(&l, "Test-Liste");
-    char tid[64]; snprintf(tid, sizeof tid, "%s", ti >= 0 ? l.items[ti].id : "");
+    CHECK(browse(p, NULL, &l) == 0 && l.count >= 3);
+    int ti = find_item(&l, "Test-Liste"), li = find_item(&l, "Lokal");
+    char tid[64], lid[64];
+    snprintf(tid, sizeof tid, "%s", ti >= 0 ? l.items[ti].id : "");
+    snprintf(lid, sizeof lid, "%s", li >= 0 ? l.items[li].id : "");
+    /* Online-Liste: Aktionen auf Playlist-Ebene */
+    PluginAction acts[8];
+    int na = ti >= 0 ? plugins_item_actions(p, &l.items[ti], acts, 8) : 0;
+    printf("  Aktionen Online-Liste: %d (%s, ...)\n", na, na ? acts[0].label : "-");
+    CHECK(na == 3 && !strcmp(acts[0].id, "pl_copy"));
+    /* bearbeitbare Kopie anlegen */
+    char msg[256]; int refresh = 0;
+    plugins_start_action(p, &l.items[ti], "pl_copy", "Meine Kopie");
+    CHECK(wait_job() == JOB_DONE && plugins_take_action_result(msg, sizeof msg, &refresh) == 0 && refresh);
+    printf("  Kopie: %s\n", msg);
     plugins_list_free(&l);
+    CHECK(browse(p, NULL, &l) == 0 && find_item(&l, "Meine Kopie") >= 0);
+    plugins_list_free(&l);
+
     CHECK(browse(p, tid, &l) == 0 && l.count == 3);
     if (l.count == 3) {
         CHECK(l.items[0].thumb && !strcmp(l.items[0].thumb, "https://logo.example/a.png"));
         CHECK(resolve(p, &l.items[0], &si) == 0 && !strcmp(si.url, "https://a.example/a.m3u8") && !strcmp(si.headers, "Referer: https://ref.example/"));
         CHECK(!strcmp(l.items[1].title, "Kanal B, mit Komma"));
+        na = plugins_item_actions(p, &l.items[0], acts, 8);
+        CHECK(na == 1 && !strcmp(acts[0].id, "check"));      /* online: nur prüfen */
+    }
+    plugins_list_free(&l);
+
+    /* lokale Liste: löschen, umbenennen, verschieben, defekte entfernen */
+    CHECK(browse(p, lid, &l) == 0 && l.count == 4);
+    if (l.count == 4) {
+        na = plugins_item_actions(p, &l.items[1], acts, 8);
+        CHECK(na == 5);
+        plugins_start_action(p, &l.items[1], "delete", NULL);
+        CHECK(wait_job() == JOB_DONE && plugins_take_action_result(msg, sizeof msg, &refresh) == 0 && refresh);
+        plugins_list_free(&l);
+        CHECK(browse(p, lid, &l) == 0 && l.count == 3 && find_item(&l, "Zwei") < 0);
+        plugins_start_action(p, &l.items[0], "rename", "Erster Sender");
+        CHECK(wait_job() == JOB_DONE); plugins_take_action_result(msg, sizeof msg, &refresh);
+        plugins_start_action(p, &l.items[2], "up", NULL);
+        CHECK(wait_job() == JOB_DONE); plugins_take_action_result(msg, sizeof msg, &refresh);
+        plugins_list_free(&l);
+        CHECK(browse(p, lid, &l) == 0 && l.count == 3 && !strcmp(l.items[0].title, "Erster Sender") && !strcmp(l.items[1].title, "Kaputt"));
+        plugins_list_free(&l);
+        /* auf Playlist-Ebene: defekte Streams entfernen */
+        CHECK(browse(p, NULL, &l) == 0);
+        li = find_item(&l, "Lokal");
+        if (li >= 0) {
+            plugins_start_action(p, &l.items[li], "pl_check", NULL);
+            CHECK(wait_job() == JOB_DONE && plugins_take_action_result(msg, sizeof msg, &refresh) == 0);
+            printf("  Pruefung: %s\n", msg);
+        }
+        plugins_list_free(&l);
+        CHECK(browse(p, lid, &l) == 0 && l.count == 2 && find_item(&l, "Kaputt") < 0);
+        plugins_list_free(&l);
+        /* Playlist löschen */
+        CHECK(browse(p, NULL, &l) == 0);
+        li = find_item(&l, "Lokal");
+        int before = l.count;
+        if (li >= 0) { plugins_start_action(p, &l.items[li], "pl_delete", NULL); CHECK(wait_job() == JOB_DONE); plugins_take_action_result(msg, sizeof msg, &refresh); }
+        plugins_list_free(&l);
+        CHECK(browse(p, NULL, &l) == 0 && l.count == before - 1 && find_item(&l, "Lokal") < 0);
     }
     plugins_list_free(&l);
 
@@ -248,7 +312,7 @@ int main(void) {
     }
     CHECK(find_item(&l, "(Player)") >= 0);
     plugins_list_free(&l);
-    CHECK(browse(d, NULL, &l) == 0 && l.count >= 1 && l.items[0].kind == ITEM_FOLDER);   /* Verlauf */
+    CHECK(browse(d, NULL, &l) == 0 && l.count >= 2 && l.items[0].kind == ITEM_SEARCH && l.items[1].kind == ITEM_FOLDER);   /* Eingabe + Verlauf */
     plugins_list_free(&l);
     CHECK(search(d, "nichts hier", &l) < 0);
     CHECK(search(d, " https://x.example/a.mp4 ", &l) == 0 && l.count == 1);
@@ -273,12 +337,17 @@ int main(void) {
     CHECK(browse(sp, NULL, &l) == 0 && l.count == 2);
     char root[128]; snprintf(root, sizeof root, "%s", l.count ? l.items[0].id : "");
     plugins_list_free(&l);
-    CHECK(browse(sp, root, &l) == 0 && l.count == 2 && !strcmp(l.items[0].title, "Staffel 1"));
-    char season[160]; snprintf(season, sizeof season, "%s", l.count ? l.items[0].id : "");
+    CHECK(browse(sp, root, &l) == 0 && l.count == 2);
+    if (l.count == 2) printf("  South Park Staffeln: %s, %s\n", l.items[0].title, l.items[1].title);
+    CHECK(l.count == 2 && !strcmp(l.items[0].title, "Staffel 1") && !strcmp(l.items[1].title, "Staffel 2"));
+    char s1[160], s2[160];
+    snprintf(s1, sizeof s1, "%s", l.count == 2 ? l.items[0].id : "");
+    snprintf(s2, sizeof s2, "%s", l.count == 2 ? l.items[1].id : "");
     plugins_list_free(&l);
-    CHECK(browse(sp, season, &l) == 0 && l.count == 2 && l.items[1].kind == ITEM_MORE);
+    CHECK(browse(sp, s1, &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Cartman und die Analsonde"));
+    plugins_list_free(&l);
+    CHECK(browse(sp, s2, &l) == 0 && l.count == 2 && l.items[1].kind == ITEM_MORE);
     if (l.count == 2) {
-        printf("  South Park: %s | %s | %s\n", l.items[0].title, l.items[0].subtitle ? l.items[0].subtitle : "-", l.items[0].thumb ? l.items[0].thumb : "-");
         CHECK(!strcmp(l.items[0].title, "Cartman") && l.items[0].thumb && strstr(l.items[0].thumb, "images.paramount.tech"));
         CHECK(resolve(sp, &l.items[0], &si) == 0 && !strcmp(si.url, "https://dai.example/sp/x1/master.m3u8"));
         CHECK(browse(sp, l.items[1].id, &l2) == 0 && l2.count == 1 && !strcmp(l2.items[0].title, "Weight Gain"));

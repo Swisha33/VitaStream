@@ -15,8 +15,8 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
   - *M3U-Playlists & Favoriten* – eigene Listen, Logos, Gruppen
   - *Direkte URL & Website-Scanner* – Link abspielen oder eine Website nach Videos/Streams durchsuchen
   - *Eigene Websites* – per Muster in `sites.txt`
-- **Favoriten & Playlists** – mit Quadrat einzelne Einträge oder ganze Listen speichern
-- **Player** – MP4, HLS (inkl. AES-128), MPEG-TS; Hardware-H.264 bis 720p, Software-Ersatz für SD/Interlaced; AAC/MP3/AC3; Werbeunterbrechungen (Zeitsprünge) werden überbrückt
+- **Favoriten & Playlists** – mit Quadrat einzelne Einträge oder ganze Listen speichern; eigene Playlists bearbeiten (löschen, umbenennen, verschieben), defekte Streams automatisch entfernen, Online-Listen als bearbeitbare Kopie übernehmen
+- **Player** – MP4, HLS (inkl. AES-128 und separater Tonspuren), MPEG-TS; Hardware-H.264 bis 720p, Software-Ersatz für SD/Interlaced; AAC/MP3/AC3; Werbeunterbrechungen (Zeitsprünge) werden überbrückt
 - **AdBlock** – lokale Blockliste + eigener DNS (AdGuard, Cloudflare, Quad9, eigener Server), einzeln schaltbar
 
 ## Bedienung
@@ -94,6 +94,14 @@ return {
 ```
 
 Fehler meldet man mit `return nil, "Text"` – die App zeigt den Text an.
+
+Weitere Möglichkeiten:
+- `kind = "search"` – Eintrag öffnet die Tastatur und ruft `search(text)` auf
+- `kind = "more"` – „Weitere laden“: `browse(id)` liefert die nächste Seite
+- `actions(item)` / `action(item, id, input)` – eigene Einträge im Quadrat-Menü, z. B.
+  `{ id = "del", label = "Löschen", confirm = true }` oder `{ id = "ren", label = "Umbenennen", input = "Neuer Name" }`;
+  `action` gibt `{ message = "...", refresh = true }` zurück
+- `vs.probe(url [, headers])` – prüft, ob ein Stream antwortet
 
 **Lua-API (`vs.*`)**
 

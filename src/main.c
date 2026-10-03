@@ -31,12 +31,14 @@ int _newlib_heap_size_user = 192 * 1024 * 1024;
 #define MAX_DEPTH      16
 
 typedef enum { SCR_SOURCES, SCR_LIST, SCR_LOADING, SCR_PLAYER, SCR_SETTINGS } Screen;
-typedef enum { PEND_NONE, PEND_PUSH_LIST, PEND_PLAY, PEND_APPEND, PEND_SAVE } Pending;
+typedef enum { PEND_NONE, PEND_PUSH_LIST, PEND_PLAY, PEND_APPEND, PEND_SAVE, PEND_ACTION, PEND_REFRESH } Pending;
 
 typedef struct {
     PluginList list;
     char       title[128];
     int        cursor, scroll;
+    int        is_search;      /* Herkunft für "Aktualisieren": search(arg) oder browse(arg) */
+    char      *arg;            /* NULL = Startseite */
 } Level;
 
 static Screen  scr = SCR_SOURCES, scr_before_loading = SCR_SOURCES;
@@ -49,6 +51,8 @@ static char    pending_title[128];
 static char    last_query[256];
 static int     set_cursor, set_scroll;
 static int     append_index;            /* Position des "Weitere laden"-Eintrags */
+static int     pending_is_search;       /* Herkunft der nächsten Liste */
+static char   *pending_arg;
 
 /* Speichern in eine Playlist: Einträge nacheinander auflösen */
 static struct {
@@ -78,9 +82,41 @@ static int current_preset(void)
 
 /* ---------------- Hilfen ---------------- */
 
+static void level_free(Level *lv)
+{
+    plugins_list_free(&lv->list);
+    free(lv->arg);
+    lv->arg = NULL;
+}
+
 static void stack_clear(void)
 {
-    while (depth > 0) plugins_list_free(&stack[--depth].list);
+    while (depth > 0) level_free(&stack[--depth]);
+}
+
+static void start_job_screen(Pending p, const char *title);
+
+static void set_pending_origin(int is_search, const char *arg)
+{
+    free(pending_arg);
+    pending_arg = arg ? strdup(arg) : NULL;
+    pending_is_search = is_search;
+}
+
+static int start_browse(const char *id, const char *title)
+{
+    if (plugins_start_browse(cur_src, id) != 0) return -1;
+    set_pending_origin(0, id);
+    start_job_screen(PEND_PUSH_LIST, title);
+    return 0;
+}
+
+static int start_search(const char *q, const char *title)
+{
+    if (plugins_start_search(cur_src, q) != 0) return -1;
+    set_pending_origin(1, q);
+    start_job_screen(PEND_PUSH_LIST, title);
+    return 0;
 }
 
 static void reload_blocklist(void)
@@ -104,30 +140,32 @@ static void open_source(int idx)
     stack_clear();
     cur_src = idx;
     if (s->has_browse) {
-        if (plugins_start_browse(idx, NULL) == 0) start_job_screen(PEND_PUSH_LIST, s->name);
+        start_browse(NULL, s->name);
     } else if (s->has_search) {
         char q[256];
         if (ui_input_text(s->name, last_query, q, sizeof q) && q[0]) {
             snprintf(last_query, sizeof last_query, "%s", q);
             char t[160];
             snprintf(t, sizeof t, "%s: %s", s->name, q);
-            if (plugins_start_search(idx, q) == 0) start_job_screen(PEND_PUSH_LIST, t);
+            start_search(q, t);
         }
     }
 }
 
-static void search_in_current(void)
+static void search_in_current_titled(const char *prompt)
 {
     Source *s = plugins_source(cur_src);
     if (!s || !s->has_search) return;
-    char q[256];
-    if (ui_input_text("Suchen", last_query, q, sizeof q) && q[0]) {
+    char q[512];
+    if (ui_input_text(prompt, last_query, q, sizeof q) && q[0]) {
         snprintf(last_query, sizeof last_query, "%s", q);
         char t[160];
         snprintf(t, sizeof t, "Suche: %s", q);
-        if (plugins_start_search(cur_src, q) == 0) start_job_screen(PEND_PUSH_LIST, t);
+        start_search(q, t);
     }
 }
+
+static void search_in_current(void) { search_in_current_titled("Suchen"); }
 
 static void fmt_time(uint64_t ms, char *out, int n)
 {
@@ -341,8 +379,11 @@ static void item_menu(void)
     Level *lv = &stack[depth - 1];
     if (!lv->list.count) return;
     PluginItem *it = &lv->list.items[lv->cursor];
-    const char *opts[3];
+    PluginAction acts[8];
+    int nacts = plugins_item_actions(cur_src, it, acts, 8);
+    const char *opts[12];
     int k = 0, a_fav = -1, a_pl = -1, a_all = -1;
+    for (int i = 0; i < nacts; i++) opts[k++] = acts[i].label;
     if (it->kind == ITEM_VIDEO) {
         a_fav = k; opts[k++] = "Zu Favoriten hinzufuegen";
         a_pl  = k; opts[k++] = "Zu Playlist hinzufuegen...";
@@ -350,6 +391,20 @@ static void item_menu(void)
     a_all = k; opts[k++] = "Ganze Liste als Playlist speichern...";
     int c = ui_menu(it->title, opts, k);
     if (c < 0) return;
+    if (c < nacts) {
+        PluginAction *a = &acts[c];
+        char input[512] = "";
+        if (a->confirm) {
+            const char *yn[] = { "Ja", "Nein" };
+            char q[160];
+            snprintf(q, sizeof q, "%s - wirklich?", a->label);
+            if (ui_menu(q, yn, 2) != 0) return;
+        }
+        if (a->input[0] && (!ui_input_text(a->input, a->def, input, sizeof input) || !input[0])) return;
+        if (plugins_start_action(cur_src, it, a->id, a->input[0] ? input : NULL) == 0)
+            start_job_screen(PEND_ACTION, a->label);
+        return;
+    }
     if (c == a_fav || c == a_pl) {
         if (!choose_playlist(c == a_fav)) return;
         int *idx = malloc(sizeof(int));
@@ -537,7 +592,9 @@ int main(void)
                 PluginItem *it = &lv->list.items[lv->cursor];
                 if (it->kind == ITEM_FOLDER) {
                     thumbs_drop_pending();
-                    if (plugins_start_browse(cur_src, it->id) == 0) start_job_screen(PEND_PUSH_LIST, it->title);
+                    start_browse(it->id, it->title);
+                } else if (it->kind == ITEM_SEARCH) {
+                    search_in_current_titled(it->title);
                 } else if (it->kind == ITEM_MORE) {
                     append_index = lv->cursor;
                     if (plugins_start_browse(cur_src, it->id) == 0) start_job_screen(PEND_APPEND, lv->title);
@@ -550,7 +607,7 @@ int main(void)
                 item_menu();
             } else if (in.pressed & BTN_CANCEL) {
                 thumbs_drop_pending();
-                plugins_list_free(&stack[--depth].list);
+                level_free(&stack[--depth]);
                 if (depth == 0) scr = SCR_SOURCES;
             }
 
@@ -562,8 +619,8 @@ int main(void)
             ui_header(lv->title, right);
             ui_list_thumbs(lv->list.count, lv->cursor, &lv->scroll, label_items, &lv->list);
             ui_footer(s && s->has_search
-                      ? "Bestaetigen: Oeffnen  Zurueck  Dreieck: Suchen  Quadrat: Playlist/Favoriten  L/R: Seite"
-                      : "Bestaetigen: Oeffnen  Zurueck  Quadrat: Playlist/Favoriten  L/R: Seite");
+                      ? "Bestaetigen: Oeffnen  Zurueck  Dreieck: Suchen  Quadrat: Menue  L/R: Seite"
+                      : "Bestaetigen: Oeffnen  Zurueck  Quadrat: Menue  L/R: Seite");
             ui_end();
             break;
         }
@@ -578,6 +635,9 @@ int main(void)
                         memset(lv, 0, sizeof *lv);
                         plugins_take_list(&lv->list);
                         snprintf(lv->title, sizeof lv->title, "%s", pending_title);
+                        lv->is_search = pending_is_search;
+                        lv->arg = pending_arg;
+                        pending_arg = NULL;
                         scr = SCR_LIST;
                     } else {
                         plugins_job_reset();
@@ -593,6 +653,26 @@ int main(void)
                     } else {
                         plugins_list_free(&more);
                     }
+                    scr = SCR_LIST;
+                } else if (pending == PEND_ACTION) {
+                    char msg[256];
+                    int refresh = 0;
+                    plugins_take_action_result(msg, sizeof msg, &refresh);
+                    scr = SCR_LIST;
+                    pending = PEND_NONE;
+                    if (msg[0]) ui_message("Erledigt", msg);
+                    if (refresh && depth > 0) {
+                        Level *lv = &stack[depth - 1];
+                        int r = lv->is_search ? plugins_start_search(cur_src, lv->arg)
+                                              : plugins_start_browse(cur_src, lv->arg);
+                        if (r == 0) start_job_screen(PEND_REFRESH, lv->title);
+                    }
+                    break;
+                } else if (pending == PEND_REFRESH) {
+                    Level *lv = &stack[depth - 1];
+                    plugins_list_free(&lv->list);
+                    plugins_take_list(&lv->list);
+                    if (lv->cursor >= lv->list.count) lv->cursor = lv->list.count ? lv->list.count - 1 : 0;
                     scr = SCR_LIST;
                 } else if (pending == PEND_SAVE) {
                     StreamInfo si;
@@ -623,9 +703,25 @@ int main(void)
                 char msg[300];
                 snprintf(msg, sizeof msg, "%s", plugins_job_error());
                 plugins_job_reset();
+                Pending was = pending;
                 pending = PEND_NONE;
                 scr = scr_before_loading;
+                if (was == PEND_REFRESH && depth > 0) {
+                    /* Liste ist jetzt leer (z. B. letzter Eintrag gelöscht) -> eine Ebene zurück */
+                    level_free(&stack[--depth]);
+                    if (depth == 0) scr = SCR_SOURCES;
+                    else {
+                        Level *up = &stack[depth - 1];
+                        int r = up->is_search ? plugins_start_search(cur_src, up->arg) : plugins_start_browse(cur_src, up->arg);
+                        if (r == 0) { scr = SCR_LIST; start_job_screen(PEND_REFRESH, up->title); }
+                        else scr = SCR_LIST;
+                    }
+                    break;
+                }
                 ui_message("Fehler", msg);
+                /* Startseite einer Quelle leer, aber Suche möglich: direkt eingeben lassen */
+                Source *src = plugins_source(cur_src);
+                if (was == PEND_PUSH_LIST && depth == 0 && src && src->has_search) search_in_current_titled(src->name);
             } else {
                 ui_begin();
                 ui_header(pending_title, NULL);

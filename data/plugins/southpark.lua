@@ -150,8 +150,17 @@ return {
       vs.log("Lade Staffeln ...")
       local seasons, episodes, _, err = list_page(root)
       if not seasons then return nil, err end
+      -- Die Uebersichtsseite zeigt selbst schon eine Staffel (meist Staffel 1) und verlinkt
+      -- nur die uebrigen -> diese Staffel als eigenen Ordner ergaenzen
+      if #episodes > 0 then
+        local num = episodes[1].id:match("staffel%-(%d+)") or episodes[1].id:match("season%-(%d+)")
+        local label = root:find("/en/", 1, true) and "Season " or "Staffel "
+        local title = label .. (num or "1")
+        local exists = false
+        for _, s in ipairs(seasons) do if s.title == title then exists = true end end
+        if not exists then table.insert(seasons, { title = title, id = "season:" .. root, kind = "folder" }) end
+      end
       season_sort(seasons)
-      -- die Startseite zeigt meist schon Folgen der aktuellen Staffel
       local items = {}
       for _, s in ipairs(seasons) do items[#items + 1] = s end
       if #items == 0 then
