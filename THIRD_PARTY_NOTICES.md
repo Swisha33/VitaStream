@@ -16,3 +16,12 @@ VitaStream enthält bzw. linkt folgende Bibliotheken. Ihre Lizenzen gelten für 
 
 Inhalte, die über die App abgerufen werden, gehören den jeweiligen Anbietern. VitaStream enthält keine Inhalte
 und umgeht keinen Kopierschutz (DRM-geschützte Streams werden ausdrücklich nicht abgespielt).
+
+## Vorbilder (kein Code übernommen)
+
+- **ViTube** (https://github.com/shorelight82/vitube-vpk, GPL-3.0) – Ansatz des YouTube-Plugins
+  (InnerTube-Schnittstelle, visionOS-Client für HLS). Das Plugin ist eine eigene Lua-Umsetzung.
+- **plutotv** (https://github.com/ps5-payload-dev/plutotv, GPL-3.0) – dokumentierter Ablauf der
+  Pluto-TV-Schnittstelle (Sitzung, Katalog, Stitcher-Adresse). Eigene Lua-Umsetzung.
+- Offene Verzeichnisse: radio-browser.info (Radiosender), Apple-Podcastverzeichnis (Suche/Charts),
+  MediathekViewWeb, Internet Archive.

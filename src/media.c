@@ -9,6 +9,7 @@
  *  Hauptthread:   media_current_frame wählt anhand der Uhr das anzuzeigende Bild.
  */
 #include "media.h"
+#include <strings.h>
 #include "platform.h"
 #include "net.h"
 #include "hls.h"
@@ -167,6 +168,7 @@ static struct {
     volatile int    abort;
     NetStream      *ns;
     int64_t         ns_pos;
+    NetLive        *nl;               /* endloser HTTP-Stream (Internetradio) */
     Hls            *hls;
     AVFormatContext *fmt;
     AVIOContext    *avio;
@@ -334,6 +336,12 @@ static int io_read(void *opaque, uint8_t *buf, int size)
         if (n < 0) return M.abort ? AVERROR_EXIT : AVERROR(EIO);
         return n;
     }
+    if (M.nl) {
+        int n = net_live_read(M.nl, buf, size);
+        if (n == 0) return AVERROR_EOF;
+        if (n < 0) return M.abort ? AVERROR_EXIT : AVERROR(EIO);
+        return n;
+    }
     uint64_t total = net_stream_size(M.ns);
     if ((uint64_t)M.ns_pos >= total) return AVERROR_EOF;
     int n = net_stream_read(M.ns, M.ns_pos, buf, size);
@@ -359,6 +367,18 @@ static int64_t io_seek(void *opaque, int64_t off, int whence)
 
 static int io_interrupt(void *opaque) { (void)opaque; return M.abort; }
 
+/* Dateiendungen, bei denen es sicher kein Endlos-Stream ist (spart eine Anfrage) */
+static int has_file_ext(const char *url)
+{
+    static const char *ext[] = { ".mp4", ".m4v", ".mov", ".mkv", ".m4a", ".webm" };
+    const char *q = url + strcspn(url, "?#");
+    for (unsigned i = 0; i < sizeof ext / sizeof *ext; i++) {
+        size_t l = strlen(ext[i]);
+        if (q - url >= (long)l && !strncasecmp(q - l, ext[i], l)) return 1;
+    }
+    return 0;
+}
+
 static int is_hls_url(const char *url)
 {
     const char *q = url + strcspn(url, "?#");
@@ -370,7 +390,7 @@ static int is_hls_url(const char *url)
 /* Öffnet FFmpeg auf der aktuellen Quelle (NetStream, Hls oder lokale Datei). */
 static int open_format(char *err, int errlen)
 {
-    int local = !M.ns && !M.hls;
+    int local = !M.ns && !M.hls && !M.nl;
     M.fmt = avformat_alloc_context();
     M.fmt->interrupt_callback.callback = io_interrupt;
     if (!local) {
@@ -378,7 +398,7 @@ static int open_format(char *err, int errlen)
         M.avio = avio_alloc_context(iobuf, IO_BUF_SIZE, 0, NULL, io_read, NULL, M.ns ? io_seek : NULL);
         M.fmt->pb = M.avio;
         M.fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
-        if (M.hls) M.avio->seekable = 0;
+        if (M.hls || M.nl) M.avio->seekable = 0;
     }
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "probesize", "2000000", 0);
@@ -737,12 +757,123 @@ static void *audio_thread(void *arg)
     return NULL;
 }
 
+/* ================================================================ Spurwahl */
+
+static char g_apref[48];          /* bevorzugte Tonspur: Sprachkürzel, Spurname oder "#<index>" */
+static MediaTrack g_atracks[MEDIA_MAX_TRACKS], g_stracks[MEDIA_MAX_TRACKS];
+static int g_natracks, g_cur_atrack = -1, g_nstracks;
+
+void media_set_audio_pref(const char *pref)
+{
+    snprintf(g_apref, sizeof g_apref, "%s", pref ? pref : "");
+    hls_set_audio_pref(g_apref[0] == '#' ? "" : g_apref);
+}
+
+/* ISO-639-2 -> zweistelliges Kürzel (für den Vergleich mit der Vorliebe) */
+static const char *lang2(const char *l)
+{
+    static const char *map[][2] = { {"ger","de"},{"deu","de"},{"eng","en"},{"fre","fr"},{"fra","fr"},
+        {"spa","es"},{"ita","it"},{"hrv","hr"},{"rus","ru"},{"jpn","ja"},{"por","pt"},{"pol","pl"},
+        {"tur","tr"},{"nld","nl"},{"dut","nl"} };
+    for (unsigned i = 0; i < sizeof map / sizeof *map; i++) if (!strcasecmp(l, map[i][0])) return map[i][1];
+    return l;
+}
+
+static const char *stream_lang(AVStream *st)
+{
+    AVDictionaryEntry *e = av_dict_get(st->metadata, "language", NULL, 0);
+    return e && e->value ? e->value : "";
+}
+
+/* Tonspur im Container wählen: Vorliebe ("#<index>" oder Sprache) > FFmpeg-Wahl */
+static int pick_audio(AVFormatContext *fmt, int related)
+{
+    if (g_apref[0] == '#') {
+        int idx = atoi(g_apref + 1);
+        if (idx >= 0 && idx < (int)fmt->nb_streams && fmt->streams[idx]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+            return idx;
+    } else if (g_apref[0]) {
+        for (unsigned i = 0; i < fmt->nb_streams; i++) {
+            if (fmt->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+            const char *l = lang2(stream_lang(fmt->streams[i]));
+            if (l[0] && !strncasecmp(l, g_apref, 2)) return (int)i;
+        }
+    }
+    return av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, related, NULL, 0);
+}
+
+static const char *lang_label(const char *l)
+{
+    static const char *names[][2] = { {"de","Deutsch"},{"en","Englisch"},{"fr","Franzoesisch"},{"es","Spanisch"},
+        {"it","Italienisch"},{"hr","Kroatisch"},{"ru","Russisch"},{"ja","Japanisch"},{"pt","Portugiesisch"},
+        {"pl","Polnisch"},{"tr","Tuerkisch"},{"nl","Niederlaendisch"},{"qaa","Originalton"},{"mis","Audiodeskription"} };
+    const char *k = lang2(l);
+    for (unsigned i = 0; i < sizeof names / sizeof *names; i++) if (!strncasecmp(k, names[i][0], 2) && strlen(k) <= 3) return names[i][1];
+    return l;
+}
+
+/* Spurlisten nach dem Öffnen festhalten (der Demux-Thread öffnet beim Springen neu) */
+static void collect_tracks(void)
+{
+    g_natracks = g_nstracks = 0;
+    g_cur_atrack = -1;
+    if (M.hls) {
+        const HlsTrack *t; int cur;
+        int n = hls_audio_tracks(M.hls, &t, &cur);
+        for (int i = 0; i < n && g_natracks < MEDIA_MAX_TRACKS; i++) {
+            MediaTrack *m = &g_atracks[g_natracks++];
+            const char *ll = t[i].lang[0] ? lang_label(t[i].lang) : "";
+            if (ll[0] && strcasecmp(ll, t[i].name)) snprintf(m->label, sizeof m->label, "%s (%s)", t[i].name, ll);
+            else snprintf(m->label, sizeof m->label, "%s", t[i].name);
+            snprintf(m->key, sizeof m->key, "%s", t[i].lang[0] ? t[i].lang : t[i].name);
+        }
+        g_cur_atrack = cur;
+        n = hls_subtitle_tracks(M.hls, &t);
+        for (int i = 0; i < n && g_nstracks < MEDIA_MAX_TRACKS; i++) {
+            MediaTrack *m = &g_stracks[g_nstracks++];
+            const char *ll = t[i].lang[0] ? lang_label(t[i].lang) : "";
+            if (ll[0] && strcasecmp(ll, t[i].name)) snprintf(m->label, sizeof m->label, "%s (%s)", t[i].name, ll);
+            else snprintf(m->label, sizeof m->label, "%s", t[i].name);
+            snprintf(m->key, sizeof m->key, "%s", t[i].uri);
+        }
+    }
+    if (g_natracks == 0 && M.fmt && !M.split) {
+        for (unsigned i = 0; i < M.fmt->nb_streams && g_natracks < MEDIA_MAX_TRACKS; i++) {
+            AVCodecParameters *cp = M.fmt->streams[i]->codecpar;
+            if (cp->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+            const char *l = stream_lang(M.fmt->streams[i]);
+            MediaTrack *m = &g_atracks[g_natracks];
+            snprintf(m->label, sizeof m->label, "%s%s%s", l[0] ? lang_label(l) : "Spur ", l[0] ? "  -  " : "",
+                     avcodec_get_name(cp->codec_id));
+            if (!l[0]) snprintf(m->label, sizeof m->label, "Spur %d  -  %s", g_natracks + 1, avcodec_get_name(cp->codec_id));
+            snprintf(m->key, sizeof m->key, "#%u", i);
+            if ((int)i == M.ai) g_cur_atrack = g_natracks;
+            g_natracks++;
+        }
+    }
+}
+
+int media_audio_tracks(const MediaTrack **list, int *current)
+{
+    if (list) *list = g_atracks;
+    if (current) *current = g_cur_atrack;
+    return g_natracks;
+}
+
+int media_subtitle_tracks(const MediaTrack **list)
+{
+    if (list) *list = g_stracks;
+    return g_nstracks;
+}
+
+int64_t media_origin_ms(void) { return M.origin / 1000; }
+
 /* ================================================================ Demux-Thread */
 
 static int setup_streams(char *err, int errlen)
 {
     M.vi = av_find_best_stream(M.fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    M.ai = av_find_best_stream(M.fmt, AVMEDIA_TYPE_AUDIO, -1, M.vi >= 0 ? M.vi : -1, NULL, 0);
+    M.ai = pick_audio(M.fmt, M.vi >= 0 ? M.vi : -1);
 
     if (M.vi >= 0) {
         AVCodecParameters *cp = M.fmt->streams[M.vi]->codecpar;
@@ -802,11 +933,19 @@ static int setup_streams(char *err, int errlen)
 
 static int open_source(char *err, int errlen)
 {
+    char live_url[1024];
     if (!strncmp(M.url, "ux0:", 4) || !strncmp(M.url, "uma0:", 5) || !strncmp(M.url, "file:", 5)) {
         /* lokale Datei: FFmpeg liest direkt */
     } else if (is_hls_url(M.url)) {
         M.hls = hls_open(M.url, M.headers, &M.abort, err, errlen);
         if (!M.hls) return -1;
+    } else if (!has_file_ext(M.url) && (live_url[0] = 0, net_detect_live(M.url, M.headers, live_url, sizeof live_url) == 1)) {
+        /* Internetradio & Co.: endloser Stream ohne Länge */
+        M.nl = net_live_open(live_url[0] ? live_url : M.url, M.headers);
+        if (!M.nl) {
+            snprintf(err, errlen, "Verbindung fehlgeschlagen: %s", net_last_detail());
+            return -1;
+        }
     } else {
         M.ns = net_stream_open(M.url, M.headers);
         if (!M.ns) {
@@ -848,8 +987,9 @@ static int open_source(char *err, int errlen)
         }
     }
 
-    M.live = M.hls ? hls_is_live(M.hls) : 0;
-    M.duration = M.hls ? hls_duration_us(M.hls) : (M.fmt->duration > 0 ? M.fmt->duration : 0);
+    collect_tracks();
+    M.live = M.hls ? hls_is_live(M.hls) : (M.nl ? 1 : 0);
+    M.duration = M.hls ? hls_duration_us(M.hls) : (M.nl ? 0 : (M.fmt->duration > 0 ? M.fmt->duration : 0));
     M.origin = M.fmt->start_time != AV_NOPTS_VALUE ? M.fmt->start_time : 0;
     pos_reset(0, M.origin);
 
@@ -864,7 +1004,7 @@ static int open_source(char *err, int errlen)
                  M.split ? " (eigene Spur " : "", M.split ? (hls_audio_lang(M.hls)[0] ? hls_audio_lang(M.hls) : "?") : "");
         if (M.split) strncat(ainfo, ")", sizeof ainfo - strlen(ainfo) - 1);
     }
-    snprintf(M.info, sizeof M.info, "%s | %s | %s", M.hls ? "HLS" : (M.ns ? "HTTP" : "Datei"),
+    snprintf(M.info, sizeof M.info, "%s | %s | %s", M.hls ? "HLS" : (M.ns ? "HTTP" : (M.nl ? "Live-HTTP" : "Datei")),
              vinfo, ainfo);
     if (M.hls && hls_info(M.hls)[0]) {
         size_t l = strlen(M.info);
@@ -946,7 +1086,7 @@ static void do_seek(void)
             M.ai = ai;
             if (ai >= 0) M.atb = M.afmt->streams[ai]->time_base;
         } else {
-            int ai = av_find_best_stream(M.fmt, AVMEDIA_TYPE_AUDIO, -1, vi, NULL, 0);
+            int ai = pick_audio(M.fmt, vi);
             if (M.ai >= 0) { M.ai = ai; if (ai >= 0) M.atb = M.fmt->streams[ai]->time_base; }
         }
     } else {
@@ -1084,9 +1224,12 @@ int media_open(const char *url, const char *headers)
 
 void media_close(void)
 {
+    g_natracks = g_nstracks = 0;
+    g_cur_atrack = -1;
     if (!M.demux_started) return;
     M.abort = 1;
     if (M.ns) net_stream_abort(M.ns);
+    if (M.nl) net_live_abort(M.nl);
     pq_abort(&M.vq);
     pq_abort(&M.aq);
     pthread_cond_broadcast(&M.fcv);
@@ -1108,6 +1251,7 @@ void media_close(void)
         if (M.slot[i].px) fb_destroy(i);
     hls_close(M.hls);
     net_stream_close(M.ns);
+    net_live_close(M.nl);
     free(M.url);
     free(M.headers);
     pthread_mutex_destroy(&M.fm);

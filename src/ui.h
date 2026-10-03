@@ -6,14 +6,12 @@
 #define SCREEN_W 960
 #define SCREEN_H 544
 
-#define COL_BG       0xFF1E1A16  /* ABGR */
-#define COL_PANEL    0xFF2C2620
-#define COL_SEL      0xFF6A4A2A
-#define COL_ACCENT   0xFF33B5FF
-#define COL_TEXT     0xFFF0F0F0
-#define COL_DIM      0xFF9A9A9A
-#define COL_OK       0xFF66CC66
-#define COL_BAD      0xFF5555EE
+/* Farben (ABGR) - per Thema umschaltbar, siehe ui_set_theme */
+extern uint32_t COL_BG, COL_PANEL, COL_SEL, COL_ACCENT, COL_TEXT, COL_DIM, COL_OK, COL_BAD;
+
+int         ui_theme_count(void);
+const char *ui_theme_name(int i);
+void        ui_set_theme(int i);
 
 /* Tasten (nach Region: Kreuz/Kreis vertauscht, falls nötig) */
 typedef struct {

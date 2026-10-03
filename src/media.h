@@ -29,6 +29,16 @@ int        media_buffering(void);
 int        media_has_video(void);
 int        media_is_live(void);
 
+/* Ton- und Untertitelspuren des geöffneten Streams.
+   Ton: key = Sprachkürzel/Spurname (HLS) oder "#<index>" (Container) -> media_set_audio_pref(key),
+   danach neu öffnen. Untertitel: key = URL der Untertitel-Playlist (WebVTT). */
+#define MEDIA_MAX_TRACKS 12
+typedef struct { char label[64]; char key[1024]; } MediaTrack;
+int        media_audio_tracks(const MediaTrack **list, int *current);
+int        media_subtitle_tracks(const MediaTrack **list);
+void       media_set_audio_pref(const char *pref);   /* gilt beim nächsten media_open */
+int64_t    media_origin_ms(void);                    /* Zeitstempel des Anfangs (für Untertitel) */
+
 /* Kurzinfo für die Debug-Anzeige */
 void       media_debug(char *buf, int n);
 

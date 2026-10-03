@@ -9,6 +9,9 @@ SAN="-fsanitize=address,undefined -g -O1"
 gcc -Wall $SAN -o test_adblock test_adblock.c ../src/adblock.c
 ./test_adblock | tail -1
 
+gcc -Wall $SAN -o test_sub test_sub.c ../src/sub.c -lpthread
+./test_sub
+
 gcc -Wall $SAN -o test_watched test_watched.c ../src/watched.c
 ./test_watched
 

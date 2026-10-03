@@ -41,9 +41,9 @@ static int mediathek_reply(const char *post, NetBuf *out)
     len += snprintf(b + len, cap - len, "{\"result\":{\"results\":[");
     for (int i = off; i < off + size && i < total; i++) {
         len += snprintf(b + len, cap - len,
-            "%s{\"channel\":\"ZDF\",\"topic\":\"%s\",\"title\":\"Folge %d\",\"timestamp\":1727900000,\"duration\":2700,"
-            "\"url_video\":\"https://zdf.example/v%d.mp4\",\"url_website\":\"https://www.zdf.example/folge-%d.html\"}",
-            i > off ? "," : "", i % 3 ? "Terra X" : "Die R\\u00f6mer", i, i, i);
+            "%s{\"channel\":\"%s\",\"topic\":\"%s\",\"title\":\"Folge %d\",\"timestamp\":1727900000,\"duration\":2700,"
+            "\"url_video\":\"https://zdf.example/v%d.mp4\",\"url_website\":\"https://www.zdf.example/folge-%d.html\",\"url_subtitle\":\"https://zdf.example/ut%d.xml\"}",
+            i > off ? "," : "", size >= 1000 && i == 7 ? "NeuKanal" : "ZDF", i % 3 ? "Terra X" : "Die R\\u00f6mer", i, i, i, i);
     }
     len += snprintf(b + len, cap - len, "],\"queryInfo\":{\"totalResults\":%d}},\"err\":null}", total);
     out->data = b;
@@ -93,6 +93,105 @@ static int jelly_reply(const char *url, const char *post, NetBuf *out, long *sta
     return reply(out, "{}");
 }
 
+/* --- simulierte Audiothek-Quellen (radio-browser, iTunes, RSS) --- */
+static int audio_reply(const char *url, NetBuf *out, long *status) {
+    if (strstr(url, "de1.api.radio-browser.info")) { if (status) *status = 503; return reply(out, "down"); }   /* Ausweichserver testen */
+    if (strstr(url, "api.radio-browser.info/json/stations/search")) {
+        snprintf(last_url, sizeof last_url, "%s", url);
+        return reply(out, "[{\"stationuuid\":\"a\",\"name\":\" 1LIVE \",\"url\":\"http://x/1live\",\"url_resolved\":\"http://wdr.example/1live.mp3\","
+            "\"favicon\":\"https://wdr.example/logo.png\",\"codec\":\"MP3\",\"bitrate\":128,\"tags\":\"pop,charts\",\"countrycode\":\"DE\"},"
+            "{\"name\":\"Opus-Sender\",\"url_resolved\":\"http://x/opus\",\"codec\":\"OGG\",\"bitrate\":96},"
+            "{\"name\":\"HLS-Sender\",\"url_resolved\":\"https://x/radio/master.m3u8\",\"codec\":\"UNKNOWN\",\"favicon\":\"https://x/f.ico\"}]");
+    }
+    if (strstr(url, "itunes.apple.com/search"))
+        return reply(out, "{\"resultCount\":1,\"results\":[{\"collectionName\":\"Tagesschau Podcast\",\"artistName\":\"ARD\","
+            "\"feedUrl\":\"https://feed.example/tagesschau.xml\",\"artworkUrl600\":\"https://img.example/ts.jpg\",\"trackCount\":120,\"primaryGenreName\":\"Nachrichten\"}]}");
+    if (strstr(url, "rss.applemarketingtools.com"))
+        return reply(out, "{\"feed\":{\"results\":[{\"id\":\"111\",\"name\":\"Hit 1\"},{\"id\":\"222\",\"name\":\"Hit 2\"}]}}");
+    if (strstr(url, "itunes.apple.com/lookup") && strstr(url, "111,222"))
+        return reply(out, "{\"results\":[{\"collectionId\":222,\"collectionName\":\"Hit 2\",\"feedUrl\":\"https://feed.example/2.xml\"},"
+            "{\"collectionId\":111,\"collectionName\":\"Hit 1\",\"feedUrl\":\"https://feed.example/1.xml\"}]}");
+    if (strstr(url, "feed.example/tagesschau.xml"))
+        return reply(out, "<?xml version=\"1.0\"?><rss xmlns:itunes=\"x\"><channel><title>Tagesschau</title>"
+            "<itunes:image href=\"https://img.example/kanal.jpg\"/>"
+            "<item><title><![CDATA[Folge &amp; Eins]]></title><pubDate>Fri, 02 Oct 2026 20:00:00 +0200</pubDate>"
+            "<enclosure url=\"https://media.example/1.mp3?a=1&amp;b=2\" length=\"1\" type=\"audio/mpeg\"/><itunes:duration>754</itunes:duration></item>"
+            "<item><title>Ohne Datei</title></item>"
+            "<item><title>Zwei</title><enclosure url=\"https://media.example/2.mp3\" type=\"audio/mpeg\"/><itunes:duration>01:02:03</itunes:duration>"
+            "<itunes:image href=\"https://img.example/f2.jpg\"/></item></channel></rss>");
+    return NET_ERR;
+}
+
+/* --- simulierte Pluto-TV-API --- */
+static int pluto_boots;
+static int pluto_reply(const char *url, const char *hdr, NetBuf *out, long *status) {
+    if (strstr(url, "boot.pluto.tv/v4/start")) {
+        pluto_boots++;
+        return reply(out, "{\"sessionToken\":\"PTOK\",\"stitcherParams\":\"?appName=web&deviceId=abc\","
+                          "\"servers\":{\"stitcher\":\"https://stitcher.pluto.example\"}}");
+    }
+    if (!hdr || !strstr(hdr, "Authorization: Bearer PTOK")) { if (status) *status = 401; return reply(out, "{}"); }
+    if (strstr(url, "/v3/vod/categories"))
+        return reply(out, "{\"categories\":[{\"name\":\"Top-Filme\",\"totalItemsCount\":250,\"items\":["
+            "{\"_id\":\"m1\",\"name\":\"Ein Film\",\"type\":\"movie\",\"genre\":\"Komoedie\",\"duration\":5400000,"
+            "\"covers\":[{\"aspectRatio\":\"16:9\",\"url\":\"https://images.pluto.tv/m1.jpg\"}],"
+            "\"stitched\":{\"path\":\"https://old.example/v1/stitch/hls/episode/m1/master.m3u8?old=1\"}},"
+            "{\"_id\":\"s1\",\"name\":\"Eine Serie\",\"type\":\"series\",\"genre\":\"Krimi\",\"seasonsNumbers\":[1,2]}]},"
+            "{\"name\":\"Leer\",\"items\":[]}]}");
+    if (strstr(url, "/v3/vod/series/s1/seasons"))
+        return reply(out, "{\"name\":\"Eine Serie\",\"seasons\":[{\"number\":2,\"episodes\":[{\"_id\":\"e21\",\"name\":\"Zwei-Eins\",\"number\":1}]},"
+            "{\"number\":1,\"episodes\":[{\"_id\":\"e12\",\"name\":\"Zweite\",\"number\":2,\"duration\":1300000},{\"_id\":\"e11\",\"name\":\"Erste\",\"number\":1}]}]}");
+    return reply(out, "{}");
+}
+
+/* --- simulierte YouTube-InnerTube-API --- */
+static int yt_reply(const char *url, const char *post, const char *hdr, NetBuf *out) {
+    snprintf(last_post, sizeof last_post, "%s", post ? post : "");
+    if (strstr(url, "/youtubei/v1/guide"))
+        return reply(out, "{\"responseContext\":{\"visitorData\":\"VISITOR123\"},\"items\":[]}");
+    if (strstr(url, "/youtubei/v1/navigation/resolve_url")) {
+        if (post && strstr(post, "@pokemon\""))
+            return reply(out, "{\"endpoint\":{\"browseEndpoint\":{\"browseId\":\"UCpoke\"}}}");
+        return reply(out, "{\"error\":{\"message\":\"not found\"}}");
+    }
+    if (strstr(url, "/youtubei/v1/search")) {
+        if (post && strstr(post, "\"continuation\""))
+            return reply(out, "{\"onResponseReceivedCommands\":[{\"appendContinuationItemsAction\":{\"continuationItems\":["
+                "{\"itemSectionRenderer\":{\"contents\":[{\"videoRenderer\":{\"videoId\":\"vid3\",\"title\":{\"runs\":[{\"text\":\"Seite 2\"}]}}}]}}]}}]}");
+        return reply(out, "{\"responseContext\":{\"visitorData\":\"VISITOR123\"},\"contents\":{\"twoColumnSearchResultsRenderer\":{\"primaryContents\":{\"sectionListRenderer\":{\"contents\":["
+            "{\"itemSectionRenderer\":{\"contents\":["
+            "{\"channelRenderer\":{\"channelId\":\"UCpoke\",\"title\":{\"simpleText\":\"Pokemon\"},\"videoCountText\":{\"runs\":[{\"text\":\"3000 Videos\"}]}}},"
+            "{\"videoRenderer\":{\"videoId\":\"vid1\",\"title\":{\"runs\":[{\"text\":\"Pokemon Folge 1\"}]},\"ownerText\":{\"runs\":[{\"text\":\"Pokemon\"}]},"
+            "\"lengthText\":{\"simpleText\":\"22:10\"},\"navigationEndpoint\":{\"watchEndpoint\":{\"videoId\":\"vid1\"}}}},"
+            "{\"lockupViewModel\":{\"contentId\":\"vid2\",\"contentType\":\"LOCKUP_CONTENT_TYPE_VIDEO\",\"metadata\":{\"lockupMetadataViewModel\":{\"title\":{\"content\":\"Pokemon Folge 2\"}}},"
+            "\"contentImage\":{\"thumbnailViewModel\":{\"overlays\":[{\"thumbnailBadgeViewModel\":{\"text\":\"21:55\"}}]}}}}"
+            "]}},"
+            "{\"continuationItemRenderer\":{\"continuationEndpoint\":{\"continuationCommand\":{\"token\":\"TOKEN2\"}}}}"
+            "]}}}}}");
+    }
+    if (strstr(url, "/youtubei/v1/browse")) {
+        if (post && strstr(post, "\"VLPLstaffel1\""))
+            return reply(out, "{\"contents\":{\"playlistVideoListRenderer\":{\"contents\":["
+                "{\"playlistVideoRenderer\":{\"videoId\":\"e1\",\"index\":{\"simpleText\":\"1\"},\"title\":{\"runs\":[{\"text\":\"Pika!\"}]},\"lengthText\":{\"simpleText\":\"22:00\"}}},"
+                "{\"playlistVideoRenderer\":{\"videoId\":\"e2\",\"index\":{\"simpleText\":\"2\"},\"title\":{\"runs\":[{\"text\":\"Glurak\"}]}}}]}}}");
+        if (post && strstr(post, "EglwbGF5bGlzdHPyBgQKAkIA"))
+            return reply(out, "{\"header\":{\"pageHeaderRenderer\":{\"channelId\":\"UCpoke\",\"title\":{\"simpleText\":\"Pokemon\"}}},"
+                "\"contents\":[{\"lockupViewModel\":{\"contentId\":\"PLstaffel1\",\"contentType\":\"LOCKUP_CONTENT_TYPE_PLAYLIST\","
+                "\"metadata\":{\"lockupMetadataViewModel\":{\"title\":{\"content\":\"Staffel 1\"}}}}}]}");
+        if (post && strstr(post, "EgZ2aWRlb3PyBgQKAjoA"))
+            return reply(out, "{\"contents\":[{\"richItemRenderer\":{\"content\":{\"videoRenderer\":{\"videoId\":\"cv1\",\"title\":{\"runs\":[{\"text\":\"Neuestes Video\"}]},"
+                "\"publishedTimeText\":{\"simpleText\":\"vor 2 Tagen\"}}}}}]}");
+    }
+    if (strstr(url, "/youtubei/v1/player")) {
+        if (!hdr || !strstr(hdr, "X-Youtube-Client-Name: 101") || !strstr(hdr, "X-Goog-Visitor-Id: VISITOR123"))
+            return reply(out, "{\"playabilityStatus\":{\"status\":\"ERROR\",\"reason\":\"falscher Client\"}}");
+        if (post && strstr(post, "\"altersfrei\""))
+            return reply(out, "{\"playabilityStatus\":{\"status\":\"LOGIN_REQUIRED\",\"reason\":\"Melde dich an\"}}");
+        return reply(out, "{\"playabilityStatus\":{\"status\":\"OK\"},\"streamingData\":{\"hlsManifestUrl\":\"https://manifest.googlevideo.com/api/manifest/hls_variant/id/x/file/index.m3u8\"}}");
+    }
+    return reply(out, "{}");
+}
+
 /* --- simulierte Website fuer den Explorer --- */
 static int explorer_reply(const char *url, const char *post, NetBuf *out) {
     /* Startseite mit Suchformular und Inhaltslinks */
@@ -129,6 +228,10 @@ int net_request(const char *url, const char *post, const char *hdr, NetBuf *out,
     if (final_url) snprintf(final_url, fl, "%s", url);
     snprintf(last_headers, sizeof last_headers, "%s", hdr ? hdr : "");
     if (net_check_url(url) == NET_BLOCKED) return NET_BLOCKED;
+    if (strstr(url, "youtube.com/youtubei/")) return yt_reply(url, post, hdr, out);
+    if (strstr(url, "pluto.tv")) return pluto_reply(url, hdr, out, status);
+    if (strstr(url, "radio-browser.info") || strstr(url, "itunes.apple.com") || strstr(url, "applemarketingtools") || strstr(url, "feed.example"))
+        return audio_reply(url, out, status);
     if (strstr(url, "archive.org/advancedsearch.php")) {
         snprintf(last_url, sizeof last_url, "%s", url);
         return reply(out, "{\"response\":{\"numFound\":2,\"docs\":["
@@ -286,6 +389,12 @@ int main(void) {
     CHECK(strstr(last_url, "Croatian") && strstr(last_url, "zombie"));
     plugins_list_free(&l);
     CHECK(browse(m, "lang:de", &l) == 0 && l.count > 10 && l.items[0].kind == ITEM_SEARCH);
+    CHECK(find_item(&l, "NeuKanal") > 0 && strstr(l.items[1].subtitle, "aktualisiert"));   /* neu entdeckter Sender */
+    {
+        FILE *cf = fopen(VS_DATA_DIR "/mediathek_channels.txt", "r");
+        char cb[4096] = ""; if (cf) { fread(cb, 1, sizeof cb - 1, cf); fclose(cf); }
+        CHECK(strstr(cb, "NeuKanal") && strstr(cb, "ARD"));
+    }
     int zdf = find_item(&l, "ZDF");
     char zid[64]; snprintf(zid, sizeof zid, "%s", zdf >= 0 ? l.items[zdf].id : "");
     plugins_list_free(&l);
@@ -314,6 +423,10 @@ int main(void) {
     CHECK(l.count == 40 && wrong == 0 && l.items[l.count - 1].kind == ITEM_VIDEO);
     CHECK(strstr(last_post, "\"sortOrder\":\"asc\"") != NULL);
     CHECK(l.count >= 2 && !strcmp(l.items[0].title, "Folge 0") && !strcmp(l.items[1].title, "Folge 3"));
+    if (l.count) {
+        CHECK(resolve(m, &l.items[0], &si) == 0 && !strcmp(si.url, "https://zdf.example/v0.mp4"));
+        CHECK(si.nsubs == 1 && !strcmp(si.sub_url[0], "https://zdf.example/ut0.xml") && strstr(si.sub_label[0], "Deutsch"));
+    }
     plugins_list_free(&l);
     CHECK(browse(m, cat_id, &l) == 0 && l.count == 2);
     CHECK(strstr(last_post, "\"query\":\"film\"") && strstr(last_post, "\"duration_min\":4200") && strstr(last_post, "\"query\":\"ZDF\""));
@@ -539,6 +652,97 @@ int main(void) {
     /* verschleierter Hoster: keine Unterstuetzung, klare Meldung */
     if (voe >= 0) { plugins_start_resolve(ex, &l.items[voe]); CHECK(wait_job() == JOB_ERROR);
         printf("  verschleierter Hoster -> %s\n", plugins_job_error()); plugins_job_reset(); }
+    plugins_list_free(&l);
+
+    /* ---------- YouTube ---------- */
+    int yt = find_src("YouTube"); CHECK(yt >= 0);
+    CHECK(browse(yt, NULL, &l) == 0 && l.count == 3 && l.items[0].kind == ITEM_SEARCH);
+    plugins_list_free(&l);
+    CHECK(search(yt, "pokemon", &l) == 0);
+    for (int i = 0; i < l.count; i++) printf("    yt: %s | %s | %s\n", l.items[i].title, l.items[i].subtitle, l.items[i].id);
+    CHECK(l.count == 4 && l.items[0].kind == ITEM_FOLDER && !strcmp(l.items[0].id, "chid:UCpoke"));
+    CHECK(find_item(&l, "Pokemon Folge 1") == 1 && strstr(l.items[1].subtitle, "22:10") && strstr(l.items[1].subtitle, "Pokemon"));
+    CHECK(find_item(&l, "Pokemon Folge 2") == 2 && strstr(l.items[2].subtitle, "21:55"));
+    CHECK(l.items[1].thumb && !strcmp(l.items[1].thumb, "https://i.ytimg.com/vi/vid1/mqdefault.jpg"));
+    CHECK(l.items[3].kind == ITEM_MORE);
+    if (l.count == 4) {
+        CHECK(resolve(yt, &l.items[1], &si) == 0 && strstr(si.url, "manifest.googlevideo.com") && strstr(si.headers, "User-Agent:"));
+        CHECK(strstr(last_post, "\"VISIONOS\"") && strstr(last_post, "\"videoId\":\"vid1\""));
+        CHECK(browse(yt, l.items[3].id, &l2) == 0 && l2.count == 1 && !strcmp(l2.items[0].title, "Seite 2"));
+        plugins_list_free(&l2);
+    }
+    plugins_list_free(&l);
+    /* offizieller Kanal: Handle -> Kanal -> Playlisten -> Folgen in Reihenfolge */
+    CHECK(browse(yt, "official", &l) == 0 && l.count >= 5);
+    int pk = find_item(&l, "Pokemon (offiziell)");
+    char pkid[128]; snprintf(pkid, sizeof pkid, "%s", pk >= 0 ? l.items[pk].id : "");
+    int lg = find_item(&l, "LEGO");
+    char lgid[128]; snprintf(lgid, sizeof lgid, "%s", lg >= 0 ? l.items[lg].id : "");
+    plugins_list_free(&l);
+    CHECK(browse(yt, pkid, &l) == 0 && l.count == 2 && strstr(l.items[1].id, "chp:UCpoke"));
+    char chp[64]; snprintf(chp, sizeof chp, "%s", l.count == 2 ? l.items[1].id : "");
+    char chv[64]; snprintf(chv, sizeof chv, "%s", l.count == 2 ? l.items[0].id : "");
+    plugins_list_free(&l);
+    CHECK(browse(yt, chv, &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Neuestes Video"));
+    plugins_list_free(&l);
+    CHECK(browse(yt, chp, &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Staffel 1") && !strcmp(l.items[0].id, "pl:PLstaffel1"));
+    plugins_list_free(&l);
+    CHECK(browse(yt, "pl:PLstaffel1", &l) == 0 && l.count == 2 && !strcmp(l.items[0].title, "1. Pika!") && !strcmp(l.items[1].title, "2. Glurak"));
+    plugins_list_free(&l);
+    /* Handle nicht aufloesbar -> Suche nach dem Namen */
+    CHECK(browse(yt, lgid, &l) == 0 && find_item(&l, "Pokemon Folge 1") >= 0);
+    plugins_list_free(&l);
+    /* ---------- Pluto TV auf Abruf ---------- */
+    int pl = find_src("Pluto"); CHECK(pl >= 0);
+    CHECK(browse(pl, NULL, &l) == 0 && l.count == 3);
+    plugins_list_free(&l);
+    CHECK(browse(pl, "genres:movies", &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Komoedie"));
+    char gid[64]; snprintf(gid, sizeof gid, "%s", l.count ? l.items[0].id : "");
+    plugins_list_free(&l);
+    CHECK(browse(pl, gid, &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Ein Film") && strstr(l.items[0].subtitle, "1 Std. 30 Min."));
+    if (l.count) {
+        CHECK(resolve(pl, &l.items[0], &si) == 0);
+        printf("  Pluto-Stream: %s\n", si.url);
+        CHECK(!strcmp(si.url, "https://stitcher.pluto.example/v2/stitch/hls/episode/m1/master.m3u8?appName=web&deviceId=abc&jwt=PTOK&masterJWTPassthrough=true&includeExtendedEvents=true"));
+    }
+    plugins_list_free(&l);
+    CHECK(browse(pl, "catpage:0", &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Top-Filme") && strstr(l.items[0].subtitle, "2+"));
+    plugins_list_free(&l);
+    CHECK(browse(pl, "genres:series", &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Krimi"));
+    plugins_list_free(&l);
+    CHECK(browse(pl, "series:s1", &l) == 0 && l.count == 2 && !strcmp(l.items[0].title, "Staffel 1") && !strcmp(l.items[1].title, "Staffel 2"));
+    plugins_list_free(&l);
+    CHECK(browse(pl, "series:s1:1", &l) == 0 && l.count == 2 && !strcmp(l.items[0].title, "1. Erste") && !strcmp(l.items[1].title, "2. Zweite"));
+    if (l.count == 2) {
+        CHECK(resolve(pl, &l.items[0], &si) == 0 && strstr(si.url, "/v2/stitch/hls/episode/e11/master.m3u8?"));
+    }
+    plugins_list_free(&l);
+
+    /* ---------- Audiothek ---------- */
+    int au = find_src("Audiothek"); CHECK(au >= 0);
+    CHECK(browse(au, NULL, &l) == 0 && l.count == 7 && l.items[0].kind == ITEM_SEARCH && l.items[1].kind == ITEM_SEARCH);
+    plugins_list_free(&l);
+    CHECK(browse(au, "rc:DE:0", &l) == 0 && l.count == 2);      /* OGG/Opus aussortiert, HLS bleibt */
+    CHECK(strstr(last_url, "fi1.api.radio-browser.info") && strstr(last_url, "countrycode=DE") && strstr(last_url, "hidebroken=true"));
+    if (l.count == 2) {
+        CHECK(!strcmp(l.items[0].title, "1LIVE") && strstr(l.items[0].subtitle, "MP3 128 kbit/s") && l.items[0].thumb);
+        CHECK(l.items[1].thumb == NULL);                          /* .ico kann die App nicht anzeigen */
+        CHECK(resolve(au, &l.items[0], &si) == 0 && !strcmp(si.url, "http://wdr.example/1live.mp3"));
+    }
+    plugins_list_free(&l);
+    CHECK(search_ctx(au, "wdr 2", "radiosearch", &l) == 0 && strstr(last_url, "name=wdr%202"));
+    plugins_list_free(&l);
+    CHECK(search_ctx(au, "tagesschau", "podsearch", &l) == 0 && l.count == 1 && !strcmp(l.items[0].id, "feed:https://feed.example/tagesschau.xml"));
+    plugins_list_free(&l);
+    CHECK(browse(au, "feed:https://feed.example/tagesschau.xml", &l) == 0 && l.count == 2);
+    if (l.count == 2) {
+        CHECK(!strcmp(l.items[0].title, "Folge & Eins") && strstr(l.items[0].subtitle, "12:34") && strstr(l.items[0].subtitle, "Fri, 02 Oct 2026"));
+        CHECK(resolve(au, &l.items[0], &si) == 0 && !strcmp(si.url, "https://media.example/1.mp3?a=1&b=2"));
+        CHECK(!strcmp(l.items[0].thumb, "https://img.example/kanal.jpg") && !strcmp(l.items[1].thumb, "https://img.example/f2.jpg"));
+        CHECK(strstr(l.items[1].subtitle, "01:02:03") != NULL);
+    }
+    plugins_list_free(&l);
+    CHECK(browse(au, "podcharts", &l) == 0 && l.count == 2 && !strcmp(l.items[0].title, "Hit 1"));   /* Reihenfolge der Charts */
     plugins_list_free(&l);
 
     CHECK(plugins_reload() == n);

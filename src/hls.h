@@ -28,6 +28,14 @@ const char *hls_error(const Hls *h);
 const char *hls_audio_url(const Hls *h);
 const char *hls_audio_lang(const Hls *h);
 
+/* Ton- und Untertitelspuren der gewählten Qualität (aus EXT-X-MEDIA) */
+#define HLS_MAX_TRACKS 12
+typedef struct { char name[48]; char lang[16]; char uri[1024]; } HlsTrack;
+int  hls_audio_tracks(const Hls *h, const HlsTrack **list, int *current);
+int  hls_subtitle_tracks(const Hls *h, const HlsTrack **list);
+/* Bevorzugte Tonspur (Sprachkürzel wie "en" oder Spurname); gilt für das nächste hls_open */
+void hls_set_audio_pref(const char *pref);
+
 /* --- intern, für Tests sichtbar --- */
 void    hls_join_url(const char *base, const char *ref, char *out, int outlen);
 

@@ -16,7 +16,7 @@ local CFG   = "jellyfin.txt"
 local SESS  = "jellyfin_session.txt"
 local CLIENT = "VitaStream"
 local DEVICE = "PSVita"
-local VERSION = "0.6"
+local VERSION = "0.7"
 local PAGE = 100            -- Eintraege pro Seite
 local MAXH, MAXW = 720, 1280
 

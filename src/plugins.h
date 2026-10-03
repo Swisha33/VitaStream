@@ -45,9 +45,14 @@ typedef struct {
     int  has_browse;
 } Source;
 
+#define MAX_STREAM_SUBS 4
 typedef struct {
     char url[2048];
     char headers[1024];  /* durch '\n' getrennt */
+    /* vom Plugin gelieferte Untertitel: resolve -> { url=..., subtitles = { {label=..., url=...}, ... } } */
+    int  nsubs;
+    char sub_label[MAX_STREAM_SUBS][48];
+    char sub_url[MAX_STREAM_SUBS][1024];
 } StreamInfo;
 
 int     plugins_init(void);      /* lädt alle Plugins, gibt Anzahl Quellen zurück */

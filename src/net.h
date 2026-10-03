@@ -60,6 +60,15 @@ int        net_stream_read(NetStream *s, uint64_t offset, void *buf, uint32_t le
 void       net_stream_close(NetStream *s);
 void       net_stream_abort(NetStream *s);   /* laufende/künftige Lesevorgänge abbrechen */
 
+/* Endlose Streams (Internetradio): 1 = endlos, 0 = normale Datei, <0 Fehler.
+   final_url erhält die Adresse nach Weiterleitungen. */
+int        net_detect_live(const char *url, const char *headers, char *final_url, int fl);
+typedef struct NetLive NetLive;
+NetLive   *net_live_open(const char *url, const char *headers);
+int        net_live_read(NetLive *l, void *buf, int len);   /* blockiert; 0 = Ende, <0 Fehler/Abbruch */
+void       net_live_abort(NetLive *l);
+void       net_live_close(NetLive *l);
+
 const char *net_strerror(int code);
 
 #endif

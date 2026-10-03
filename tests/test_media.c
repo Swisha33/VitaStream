@@ -9,6 +9,7 @@
 #include "../src/config.h"
 #include "../src/adblock.h"
 #include "../src/platform.h"
+#include "../src/sub.h"
 
 extern int g_vdec_frames, g_vdec_errors, g_vdec_opened, g_aout_chunks;
 
@@ -26,7 +27,10 @@ int main(int argc, char **argv)
     if (getenv("VS_BLOCK")) { FILE *f = fopen("bl_media.txt", "w"); fputs(getenv("VS_BLOCK"), f); fclose(f); adblock_load("bl_media.txt"); }
     net_init();
 
+    if (getenv("VS_AUDIO_PREF")) media_set_audio_pref(getenv("VS_AUDIO_PREF"));
     media_open(url, getenv("VS_HEADERS"));
+    int sub_started = 0, sub_hits = 0;
+    char sub_seen[256] = "";
     int64_t t0 = plat_now_us(), last_pos = -1, pos_before = 0;
     int seek_done = 0, backwards = 0;
     int frames_changed = 0, last_slot = -2;
@@ -39,6 +43,15 @@ int main(int argc, char **argv)
         int slot = media_current_frame(&w, &h, &yuv);
         if (slot != last_slot) { frames_changed++; last_slot = slot; }
         int64_t pos = media_position_ms();
+        if (getenv("VS_SUB") && st == MS_PLAYING && !sub_started) {
+            const MediaTrack *stt;
+            if (media_subtitle_tracks(&stt) > 0) { sub_open(stt[0].key, NULL, media_origin_ms()); sub_started = 1; }
+        }
+        if (sub_started) {
+            const char *tx = sub_text_at(pos);
+            if (tx && strcmp(tx, sub_seen)) { snprintf(sub_seen, sizeof sub_seen, "%s", tx); sub_hits++;
+                printf("  UT bei %.1fs: %s\n", pos / 1000.0, tx); }
+        }
         if (st == MS_PLAYING && last_pos >= 0 && pos + 50 < last_pos && !seek_done && !getenv("VS_JUMPS")) backwards++;
         last_pos = pos;
         if (seek && !seek_done && t > secs * 1e6 / 2 && st == MS_PLAYING) {
@@ -56,6 +69,19 @@ int main(int argc, char **argv)
     printf("  Zustand=%d Fehler=\"%s\"\n  %s\n  Position=%.1fs Dauer=%.1fs Live=%d Video=%d  HW-Bilder=%d Fehler=%d Audio-Chunks=%d Anzeigewechsel=%d Rueckspruenge=%d\n",
            st, media_error(), dbg, pos / 1000.0, dur / 1000.0, media_is_live(), media_has_video(),
            g_vdec_frames, g_vdec_errors, g_aout_chunks, frames_changed, backwards);
+    {
+        const MediaTrack *at; int cur;
+        int na = media_audio_tracks(&at, &cur);
+        for (int i = 0; i < na; i++) printf("  Tonspur %d: %s [%s]%s\n", i, at[i].label, at[i].key, i == cur ? " *" : "");
+        const MediaTrack *stt;
+        int ns = media_subtitle_tracks(&stt);
+        for (int i = 0; i < ns; i++) printf("  Untertitel %d: %s\n", i, stt[i].label);
+        if (getenv("VS_EXPECT_AUDIO") && (cur < 0 || strcmp(at[cur].key, getenv("VS_EXPECT_AUDIO")))) {
+            printf("  erwartete Tonspur %s nicht aktiv\n", getenv("VS_EXPECT_AUDIO")); seek_done = seek_done; backwards++;
+        }
+        if (getenv("VS_SUB") && sub_hits < atoi(getenv("VS_SUB"))) { printf("  zu wenige Untertitel (%d)\n", sub_hits); backwards++; }
+        sub_close();
+    }
     if (seek) printf("  Sprung %+ds: vorher %.1fs, danach %.1fs\n", seek, pos_before / 1000.0, pos / 1000.0);
 
     int ok;

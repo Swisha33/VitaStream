@@ -12,6 +12,40 @@
 #include <psp2/system_param.h>
 #include <psp2/kernel/processmgr.h>
 
+/* ---------------------------------------------------------------- Themen */
+
+uint32_t COL_BG, COL_PANEL, COL_SEL, COL_ACCENT, COL_TEXT, COL_DIM, COL_OK, COL_BAD;
+
+typedef struct { const char *name; uint32_t bg, panel, sel, accent, text, dim; } Theme;
+static const Theme s_themes[] = {
+    /* name                       bg          panel       sel         accent      text        dim */
+    { "Standard (VitaStream)",   0xFF1E1A16, 0xFF2C2620, 0xFF6A4A2A, 0xFF33B5FF, 0xFFF0F0F0, 0xFF9A9A9A },
+    { "PS1 (Grau, Logo-Gelb)",   0xFF262626, 0xFF3A3A3A, 0xFF686868, 0xFF00C8FF, 0xFFEDEDED, 0xFFA0A0A0 },
+    { "PS2 (Tiefblau)",          0xFF200A00, 0xFF381804, 0xFF7A4210, 0xFFFFD080, 0xFFF4F0EA, 0xFFB09A8A },
+    { "PS3 (XMB-Blau)",          0xFF40200C, 0xFF542E14, 0xFF9A6232, 0xFFFFF0D8, 0xFFFFFFFF, 0xFFD0B8A8 },
+    { "PSP (Silber)",            0xFF343434, 0xFF4A4A4A, 0xFF7C7C7C, 0xFFF0F0F0, 0xFFFFFFFF, 0xFFB4B4B4 },
+    { "Vita (LiveArea-Blau)",    0xFF4A2810, 0xFF603618, 0xFFB06C30, 0xFFF0C840, 0xFFFFFFFF, 0xFFD8C0A8 },
+    { "Dunkel (OLED-Schwarz)",   0xFF000000, 0xFF141414, 0xFF3A3A3A, 0xFF33B5FF, 0xFFE8E8E8, 0xFF8A8A8A },
+    { "Hell",                    0xFFEFEDEA, 0xFFFFFFFF, 0xFFE8C8A0, 0xFFB05A10, 0xFF202020, 0xFF707070 },
+};
+#define NTHEMES (int)(sizeof s_themes / sizeof *s_themes)
+static int s_theme;
+
+int ui_theme_count(void) { return NTHEMES; }
+const char *ui_theme_name(int i) { return (i >= 0 && i < NTHEMES) ? s_themes[i].name : "?"; }
+
+void ui_set_theme(int i)
+{
+    if (i < 0 || i >= NTHEMES) i = 0;
+    s_theme = i;
+    const Theme *t = &s_themes[i];
+    COL_BG = t->bg; COL_PANEL = t->panel; COL_SEL = t->sel; COL_ACCENT = t->accent;
+    COL_TEXT = t->text; COL_DIM = t->dim;
+    COL_OK = 0xFF66CC66;
+    COL_BAD = 0xFF5555EE;
+    vita2d_set_clear_color(COL_BG);
+}
+
 static vita2d_pgf *s_font;
 uint32_t BTN_ACCEPT = SCE_CTRL_CROSS, BTN_CANCEL = SCE_CTRL_CIRCLE;
 
@@ -22,7 +56,7 @@ uint32_t BTN_ACCEPT = SCE_CTRL_CROSS, BTN_CANCEL = SCE_CTRL_CIRCLE;
 void ui_init(void)
 {
     vita2d_init();
-    vita2d_set_clear_color(COL_BG);
+    ui_set_theme(s_theme);
     vita2d_set_vblank_wait(1);
     s_font = vita2d_load_default_pgf();
 

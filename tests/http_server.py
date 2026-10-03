@@ -37,6 +37,27 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0"); self.end_headers(); return
         if path == "/needs_referer.m3u8" and self.headers.get("Referer") != "https://ref.example/":
             self.send_response(403); self.send_header("Content-Length", "0"); self.end_headers(); return
+        if path in ("/icy.aac", "/radio_redirect"):
+            if path == "/radio_redirect":
+                self.send_response(302); self.send_header("Location", "/icy.aac"); self.send_header("Content-Length", "0"); self.end_headers(); return
+            # Icecast-artig: keine Laenge, keine Ranges, Daten in Echtzeit (Endlosschleife)
+            data = open(os.path.join(ROOT, "radio.aac"), "rb").read()
+            self.protocol_version = "HTTP/1.0"
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/aac")
+            self.send_header("icy-name", "Testradio")
+            self.send_header("icy-br", "64")
+            self.end_headers()
+            rate = 64000 // 8 * 2      # doppelte Echtzeit, damit der Test zuegig puffert
+            try:
+                while True:
+                    for i in range(0, len(data), 4096):
+                        self.wfile.write(data[i:i + 4096]); self.wfile.flush()
+                        time.sleep(4096 / rate)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            self.close_connection = True
+            return
         if path == "/live.m3u8":
             segs = sorted(f for f in os.listdir(os.path.join(ROOT, "hls")) if f.endswith(".ts"))
             # alle 2 s (Testzeit) kommt ein Segment dazu, Fenster von 4 Segmenten

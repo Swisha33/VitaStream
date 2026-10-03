@@ -477,6 +477,23 @@ static void run_job(void)
             lua_getfield(L, res, "headers");
             read_headers_table(lua_gettop(L), W.stream.headers, sizeof W.stream.headers);
             lua_pop(L, 1);
+            lua_getfield(L, res, "subtitles");
+            if (lua_istable(L, -1)) {
+                int st = lua_gettop(L);
+                int cnt = (int)lua_rawlen(L, st);
+                for (int i = 1; i <= cnt && W.stream.nsubs < MAX_STREAM_SUBS; i++) {
+                    lua_rawgeti(L, st, i);
+                    if (lua_istable(L, -1)) {
+                        int e = lua_gettop(L);
+                        int k = W.stream.nsubs;
+                        copy_field(L, e, "url", W.stream.sub_url[k], sizeof W.stream.sub_url[k], "");
+                        copy_field(L, e, "label", W.stream.sub_label[k], sizeof W.stream.sub_label[k], "Untertitel");
+                        if (W.stream.sub_url[k][0]) W.stream.nsubs++;
+                    }
+                    lua_pop(L, 1);
+                }
+            }
+            lua_pop(L, 1);
         }
         if (!W.stream.url[0]) { set_error("Plugin lieferte keine Stream-URL"); W.state = JOB_ERROR; goto out; }
         if (net_check_url(W.stream.url) == NET_BLOCKED) {

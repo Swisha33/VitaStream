@@ -86,6 +86,7 @@ local function to_item(r, show_channel)
   return {
     title = title, subtitle = sub, id = url, kind = "video",
     thumb = (r.url_website and #r.url_website > 0) and ("og:" .. r.url_website) or nil,
+    subs = (type(r.url_subtitle) == "string" and #r.url_subtitle > 0) and r.url_subtitle or nil,
   }
 end
 
@@ -189,6 +190,39 @@ local function with(base, extra)
 end
 
 local function folder(title, id, sub) return { title = title, id = id, kind = "folder", subtitle = sub } end
+
+-- ================================================================ Senderliste (dynamisch)
+-- Einmal pro App-Start: Sender aus den neuesten Beitraegen ermitteln und mit der
+-- gespeicherten Liste zusammenfuehren. Ist MediathekViewWeb nicht erreichbar, gilt die
+-- zuletzt gespeicherte Liste, sonst die eingebaute.
+local CH_FILE = "mediathek_channels.txt"
+local dyn_channels, dyn_state = nil, nil
+
+local function channel_list()
+  if dyn_channels then return dyn_channels, dyn_state end
+  local seen, list = {}, {}
+  local function add(ch)
+    if ch and #ch > 0 and not seen[ch:lower()] then seen[ch:lower()] = true; list[#list + 1] = ch end
+  end
+  for _, ch in ipairs(CHANNELS) do add(ch) end
+  local saved = vs.read_file(CH_FILE)
+  local res = query({}, 0, 1500, 0)
+  local found = {}
+  if res then
+    for _, r in ipairs(res) do if r.channel then found[#found + 1] = r.channel end end
+  end
+  if saved then for line in saved:gmatch("[^\r\n]+") do found[#found + 1] = line end end
+  table.sort(found, function(a, b) return a:lower() < b:lower() end)
+  for _, ch in ipairs(found) do add(ch) end
+  if res then
+    vs.write_file(CH_FILE, table.concat(list, "\n") .. "\n")
+    dyn_state = "aktualisiert"
+  else
+    dyn_state = saved and "gespeicherte Liste (Server nicht erreichbar)" or "eingebaute Liste (Server nicht erreichbar)"
+  end
+  dyn_channels = list
+  return list, dyn_state
+end
 
 -- ================================================================ Internet Archive
 -- Offener, legaler Katalog frei zugaenglicher Filme/Shows in vielen Sprachen
@@ -311,11 +345,12 @@ return {
 
     -- Sprach-Startseiten
     if id == "lang:de" then
+      local chans, state = channel_list()
       local items = {
         { title = "Suchen ...", subtitle = "in allen deutschen Mediatheken", id = "search", kind = "search" },
-        folder("Alle Sender", "ch:" .. enc(""), "Kategorien ueber alle Mediatheken"),
+        folder("Alle Sender", "ch:" .. enc(""), #chans .. " Sender - Liste " .. state),
       }
-      for _, ch in ipairs(CHANNELS) do items[#items + 1] = folder(ch, "ch:" .. enc(ch)) end
+      for _, ch in ipairs(chans) do items[#items + 1] = folder(ch, "ch:" .. enc(ch)) end
       return items
     end
     if id == "lang:more" then
@@ -416,6 +451,9 @@ return {
   resolve = function(item)
     local ident = item.id:match("^iaplay:(.+)$")
     if ident then return ia_resolve(ident) end
+    if item.subs then
+      return { url = item.id, subtitles = { { label = "Deutsch (Untertitel des Senders)", url = item.subs } } }
+    end
     return item.id
   end,
 }

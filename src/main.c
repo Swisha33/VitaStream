@@ -24,6 +24,8 @@
 #include "player.h"
 #include "thumbs.h"
 #include "watched.h"
+#include "media.h"
+#include "sub.h"
 
 int _newlib_heap_size_user = 192 * 1024 * 1024;
 
@@ -61,6 +63,9 @@ static int     play_marked;
 static char   *pending_arg;
 static char   *pending_ctx;
 static int     zap_target = -1, zap_dir, zap_timer;   /* Senderwechsel: wartet auf 2. Druck */
+static StreamInfo cur_si;               /* aktueller Stream (für Spurwechsel/Untertitel) */
+static int64_t resume_ms;               /* nach Neuöffnen hierhin springen (Tonspurwechsel) */
+static int     osd_timer;               /* Einblendung im Player (Frames) */
 
 /* Speichern in eine Playlist: Einträge nacheinander auflösen */
 static struct {
@@ -277,6 +282,119 @@ static int neighbour_video(int from, int dir)
     for (int i = from + dir; i >= 0 && i < lv->list.count; i += dir)
         if (lv->list.items[i].kind == ITEM_VIDEO) return i;
     return -1;
+}
+
+/* ---------------- Ton & Untertitel ---------------- */
+
+/* Player-Einblendungen liegen auf dunklem Grund: unabhängig vom Thema hell schreiben */
+#define OSD_TEXT 0xFFF0F0F0
+#define OSD_DIM  0xFFB0B0B0
+
+static void av_menu(void)
+{
+    const MediaTrack *at, *stt;
+    int cur = -1;
+    int na = media_audio_tracks(&at, &cur);
+    int ns = media_subtitle_tracks(&stt);
+    int np = cur_si.nsubs;
+    if (na <= 1 && ns == 0 && np == 0) {
+        ui_message("Ton & Untertitel", "Dieser Stream hat nur eine Tonspur und keine Untertitel.");
+        return;
+    }
+    int was_paused = player_paused();
+    if (!was_paused) player_toggle_pause();
+
+    enum { K_AUDIO = 1, K_SUBOFF, K_SUBHLS, K_SUBPLUGIN };
+    static char buf[40][112];
+    const char *opt[40];
+    int kind[40], idx[40], n = 0;
+    for (int i = 0; i < na && n < 40; i++) {
+        snprintf(buf[n], sizeof buf[n], "Ton: %s%s", at[i].label, i == cur ? "   (aktiv)" : "");
+        kind[n] = K_AUDIO; idx[n] = i; opt[n] = buf[n]; n++;
+    }
+    if (ns || np) {
+        snprintf(buf[n], sizeof buf[n], "Untertitel aus%s", sub_active() ? "" : "   (aktiv)");
+        kind[n] = K_SUBOFF; idx[n] = -1; opt[n] = buf[n]; n++;
+    }
+    for (int i = 0; i < ns && n < 40; i++) {
+        snprintf(buf[n], sizeof buf[n], "Untertitel: %s", stt[i].label);
+        kind[n] = K_SUBHLS; idx[n] = i; opt[n] = buf[n]; n++;
+    }
+    for (int i = 0; i < np && n < 40; i++) {
+        snprintf(buf[n], sizeof buf[n], "Untertitel: %s", cur_si.sub_label[i]);
+        kind[n] = K_SUBPLUGIN; idx[n] = i; opt[n] = buf[n]; n++;
+    }
+    int c = ui_menu("Ton & Untertitel", opt, n);
+    if (c >= 0) {
+        if (kind[c] == K_AUDIO && idx[c] != cur) {
+            char key[48];
+            snprintf(key, sizeof key, "%s", at[idx[c]].key);
+            media_set_audio_pref(key);
+            if (key[0] != '#') {               /* Sprache merken (Spur-Nummern gelten nur hier) */
+                snprintf(g_cfg.audio_lang, sizeof g_cfg.audio_lang, "%s", key);
+                config_save();
+            }
+            resume_ms = (int64_t)player_position_ms();
+            player_close();
+            if (player_open(cur_si.url, cur_si.headers) != 0) ui_message("Tonspur", player_error());
+            osd_timer = 180;
+            return;                             /* neuer Stream startet von selbst */
+        } else if (kind[c] == K_SUBOFF) {
+            sub_close();
+        } else if (kind[c] == K_SUBHLS) {
+            sub_open(stt[idx[c]].key, cur_si.headers, media_origin_ms());
+        } else if (kind[c] == K_SUBPLUGIN) {
+            sub_open(cur_si.sub_url[idx[c]], cur_si.headers, 0);
+        }
+    }
+    if (!was_paused && player_paused()) player_toggle_pause();
+}
+
+/* Untertitel unten einblenden, lange Zeilen umbrechen */
+static void draw_subtitles(int osd_visible)
+{
+    if (!sub_active()) return;
+    const char *txt = sub_text_at((int64_t)player_position_ms());
+    const char *st = sub_status();
+    if (!txt && st[0]) txt = st;            /* "wird geladen ..." / Fehler */
+    if (!txt) return;
+    char lines[6][160];
+    int nl = 0;
+    const int maxw = SCREEN_W - 80;
+    const char *p = txt;
+    while (*p && nl < 6) {
+        size_t len = strcspn(p, "\n");
+        char line[512];
+        snprintf(line, sizeof line, "%.*s", (int)(len < 511 ? len : 511), p);
+        char *q = line;
+        while (*q && nl < 6) {
+            /* so viele Wörter wie passen */
+            char tmp[160];
+            int best = 0, i = 0;
+            for (;;) {
+                while (q[i] && q[i] != ' ' && i < 158) i++;
+                snprintf(tmp, sizeof tmp, "%.*s", i, q);
+                if (best && ui_text_width(tmp) > maxw) break;
+                best = i;
+                if (!q[i] || i >= 158) break;
+                i++;
+            }
+            snprintf(lines[nl++], sizeof lines[0], "%.*s", best, q);
+            q += best;
+            while (*q == ' ') q++;
+        }
+        p += len;
+        if (*p == '\n') p++;
+    }
+    int lh = 30;
+    int y = SCREEN_H - (osd_visible ? 84 : 24) - (nl - 1) * lh;
+    for (int i = 0; i < nl; i++) {
+        int w = ui_text_width(lines[i]);
+        int x = (SCREEN_W - w) / 2;
+        ui_rect(x - 10, y - 24, w + 20, lh, 0xB0000000);
+        ui_text(x, y, OSD_TEXT, lines[i]);
+        y += lh;
+    }
 }
 
 /* ---------------- Playlists / Favoriten ---------------- */
@@ -503,7 +621,7 @@ static void item_menu(void)
 }
 
 enum {
-    SET_ADBLOCK, SET_DNS, SET_PRESET, SET_CUSTOM_DNS, SET_RELOAD_BL, SET_PROXY,
+    SET_THEME, SET_AUDIO_LANG, SET_ADBLOCK, SET_DNS, SET_PRESET, SET_CUSTOM_DNS, SET_RELOAD_BL, SET_PROXY,
     SET_ADD_PLAYLIST, SET_RELOAD_PLUGINS, SET_STATS, SET_COUNT
 };
 
@@ -513,6 +631,14 @@ static void label_settings(void *ctx, int i, const char **t, const char **sub)
     static char tb[160], sb[200];
     tb[0] = sb[0] = 0;
     switch (i) {
+    case SET_THEME:
+        snprintf(tb, sizeof tb, "Thema: %s", ui_theme_name(g_cfg.theme));
+        snprintf(sb, sizeof sb, "Links/Rechts oder Bestaetigen zum Wechseln (%d Themen)", ui_theme_count());
+        break;
+    case SET_AUDIO_LANG:
+        snprintf(tb, sizeof tb, "Bevorzugte Tonspur: %s", g_cfg.audio_lang[0] ? g_cfg.audio_lang : "automatisch (Deutsch)");
+        snprintf(sb, sizeof sb, "Sprachkuerzel wie de, en, ja - im Player auch mit Dreieck waehlbar");
+        break;
     case SET_ADBLOCK:
         snprintf(tb, sizeof tb, "AdBlock (lokale Blockliste): %s", g_cfg.adblock_enabled ? "AN" : "AUS");
         snprintf(sb, sizeof sb, "%d Domains in blocklist.txt", adblock_rule_count());
@@ -560,6 +686,20 @@ static void label_settings(void *ctx, int i, const char **t, const char **sub)
 static void settings_action(int i, int dir)
 {
     switch (i) {
+    case SET_THEME: {
+        int n = ui_theme_count();
+        g_cfg.theme = (g_cfg.theme + (dir < 0 ? n - 1 : 1)) % n;
+        ui_set_theme(g_cfg.theme);
+        break;
+    }
+    case SET_AUDIO_LANG: {
+        char l[48];
+        if (ui_input_text("Tonspur-Sprache (leer = automatisch)", g_cfg.audio_lang, l, sizeof l)) {
+            snprintf(g_cfg.audio_lang, sizeof g_cfg.audio_lang, "%s", l);
+            media_set_audio_pref(g_cfg.audio_lang);
+        }
+        break;
+    }
     case SET_ADBLOCK:
         g_cfg.adblock_enabled = !g_cfg.adblock_enabled;
         break;
@@ -632,6 +772,8 @@ int main(void)
     ui_init();
     config_install_defaults();
     config_load();
+    media_set_audio_pref(g_cfg.audio_lang);
+    ui_set_theme(g_cfg.theme);
     reload_blocklist();
     net_init();
     plugins_init();
@@ -644,7 +786,7 @@ int main(void)
 
     Input in;
     int running = 1;
-    int osd_timer = 0;
+
 
     while (running) {
         ui_poll(&in);
@@ -781,6 +923,10 @@ int main(void)
                 } else if (pending == PEND_PLAY) {
                     StreamInfo si;
                     plugins_take_stream(&si);
+                    cur_si = si;
+                    resume_ms = 0;
+                    sub_close();
+                    media_set_audio_pref(g_cfg.audio_lang);
                     if (player_open(si.url, si.headers) == 0) {
                         scr = SCR_PLAYER;
                         osd_timer = 180;
@@ -843,6 +989,14 @@ int main(void)
             if (in.pressed & SCE_CTRL_LTRIGGER)   player_seek_rel(-60);
             if (in.pressed & SCE_CTRL_RTRIGGER)   player_seek_rel(60);
             if (in.pressed & SCE_CTRL_SELECT)     player_toggle_debug();
+            if (in.pressed & SCE_CTRL_TRIANGLE) { av_menu(); if (!player_active()) { sub_close(); scr = depth ? SCR_LIST : SCR_SOURCES; break; } }
+
+            /* nach Tonspurwechsel an die alte Stelle springen */
+            if (resume_ms > 0 && media_state() == MS_PLAYING) {
+                int64_t d = resume_ms - (int64_t)player_position_ms();
+                if (player_duration_ms() > 0 && (d > 3000 || d < -3000)) player_seek_rel((int)(d / 1000));
+                resume_ms = 0;
+            }
 
             /* Gesehen: automatisch, sobald 90 % angeschaut sind */
             {
@@ -853,22 +1007,25 @@ int main(void)
                 }
             }
 
-            /* Hoch/Runter: direkt zum vorherigen/nächsten Eintrag der Liste
-               (Senderwechsel, nächste Folge). */
-            if (zap_timer > 0) zap_timer--;
+            /* Hoch/Runter: vorheriger/nächster Eintrag der Liste (Senderwechsel, nächste Folge).
+               Schutz vor versehentlichem Umschalten: der erste Druck zeigt nur das Ziel an,
+               ein zweiter Druck in dieselbe Richtung (innerhalb von ca. 2 s) wechselt. */
+            if (zap_timer > 0 && --zap_timer == 0) zap_target = -1;
             if ((in.pressed & (SCE_CTRL_UP | SCE_CTRL_DOWN)) && depth > 0) {
                 int dir = (in.pressed & SCE_CTRL_UP) ? -1 : 1;
-                int next = neighbour_video(play_index, dir);
-                if (next >= 0) {
+                if (zap_target >= 0 && zap_dir == dir && zap_timer > 0) {
+                    int next = zap_target;
+                    zap_target = -1;
+                    zap_timer = 0;
                     player_close();
+                    sub_close();
                     scr = SCR_LIST;
                     start_play(next);
                     break;
                 }
-                /* kein weiterer Eintrag: kurz anzeigen */
                 zap_dir = dir;
-                zap_target = -1;
-                zap_timer = 90;
+                zap_target = neighbour_video(play_index, dir);
+                zap_timer = 120;   /* ca. 2 s */
             }
 
             int quit = (in.pressed & BTN_CANCEL) != 0;
@@ -883,6 +1040,7 @@ int main(void)
             }
             if (quit) {
                 if (quit == 1) player_close();
+                sub_close();
                 scr = depth ? SCR_LIST : SCR_SOURCES;
                 break;
             }
@@ -892,6 +1050,7 @@ int main(void)
 
             ui_begin();
             player_draw();
+            draw_subtitles(osd_timer > 0 || player_paused());
             if (osd_timer > 0 || player_paused()) {
                 if (osd_timer > 0) osd_timer--;
                 uint64_t pos = player_position_ms(), dur = player_duration_ms();
@@ -902,24 +1061,29 @@ int main(void)
                 /* Fehlerdetails bleiben nach Ende sichtbar, siehe player_error() */
 
                 ui_rect(0, 0, SCREEN_W, 40, 0xB0000000);
-                ui_text_clipped(20, 28, SCREEN_W - 260, COL_TEXT, play_title);
-                if (depth > 0) ui_text_scaled(SCREEN_W - 230, 28, COL_DIM, 0.8f, "Hoch/Runter: wechseln");
+                ui_text_clipped(20, 28, SCREEN_W - 260, OSD_TEXT, play_title);
+                if (depth > 0) ui_text_scaled(SCREEN_W - 230, 28, OSD_DIM, 0.8f, "2x Hoch/Runter: wechseln");
                 ui_rect(0, SCREEN_H - 70, SCREEN_W, 70, 0xB0000000);
                 if (dur) {
                     int w = (int)((SCREEN_W - 40) * (double)pos / (double)dur);
                     ui_rect(20, SCREEN_H - 60, SCREEN_W - 40, 6, 0x60FFFFFF);
                     ui_rect(20, SCREEN_H - 60, w, 6, COL_ACCENT);
                 }
-                ui_text(20, SCREEN_H - 22, COL_TEXT, line);
-                ui_text_scaled(SCREEN_W - 650, SCREEN_H - 22, COL_DIM, 0.8f,
-                    player_paused() ? "PAUSE   Links/Rechts: 10 s   L/R: 60 s   SELECT: Infos"
-                                    : "Bestaetigen: Pause   Links/Rechts: 10 s   L/R: 60 s   SELECT: Infos");
+                ui_text(20, SCREEN_H - 22, OSD_TEXT, line);
+                ui_text_scaled(SCREEN_W - 700, SCREEN_H - 22, OSD_DIM, 0.8f,
+                    player_paused() ? "PAUSE   Links/Rechts: 10 s   L/R: 60 s   Dreieck: Ton/UT   SELECT: Infos"
+                                    : "Pause   Links/Rechts: 10 s   L/R: 60 s   Dreieck: Ton/UT   SELECT: Infos");
             }
             if (zap_timer > 0) {
                 char zl[300];
-                snprintf(zl, sizeof zl, "Kein %s Eintrag in der Liste", zap_dir < 0 ? "vorheriger" : "weiterer");
+                if (zap_target >= 0)
+                    snprintf(zl, sizeof zl, "%s: %s   -   nochmal %s zum Wechseln",
+                             zap_dir < 0 ? "Vorheriger" : "Naechster",
+                             stack[depth - 1].list.items[zap_target].title, zap_dir < 0 ? "Hoch" : "Runter");
+                else
+                    snprintf(zl, sizeof zl, "Kein %s Eintrag in der Liste", zap_dir < 0 ? "vorheriger" : "weiterer");
                 ui_rect(0, SCREEN_H / 2 - 30, SCREEN_W, 50, 0xC0000000);
-                ui_text_clipped(30, SCREEN_H / 2 + 3, SCREEN_W - 60, COL_TEXT, zl);
+                ui_text_clipped(30, SCREEN_H / 2 + 3, SCREEN_W - 60, OSD_TEXT, zl);
             }
             ui_end();
             break;
@@ -930,9 +1094,9 @@ int main(void)
             if (in.pressed & SCE_CTRL_UP)   set_cursor = (set_cursor + SET_COUNT - 1) % SET_COUNT;
             if (in.pressed & SCE_CTRL_DOWN) set_cursor = (set_cursor + 1) % SET_COUNT;
             if (in.pressed & BTN_ACCEPT)    settings_action(set_cursor, 1);
-            if (set_cursor == SET_PRESET) {
-                if (in.pressed & SCE_CTRL_LEFT)  settings_action(SET_PRESET, -1);
-                if (in.pressed & SCE_CTRL_RIGHT) settings_action(SET_PRESET, 1);
+            if (set_cursor == SET_PRESET || set_cursor == SET_THEME) {
+                if (in.pressed & SCE_CTRL_LEFT)  settings_action(set_cursor, -1);
+                if (in.pressed & SCE_CTRL_RIGHT) settings_action(set_cursor, 1);
             }
             if (in.pressed & (BTN_CANCEL | SCE_CTRL_TRIANGLE)) {
                 config_save();

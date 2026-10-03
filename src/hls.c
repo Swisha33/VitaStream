@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -40,6 +41,10 @@ struct Hls {
     char      info[96];
     char     *audio_url;         /* separate Tonspur (EXT-X-MEDIA TYPE=AUDIO) */
     char      audio_lang[16];
+    HlsTrack  atr[HLS_MAX_TRACKS];   /* alle Tonspuren der gewählten Qualität */
+    int       natr, cur_atr;
+    HlsTrack  str[HLS_MAX_TRACKS];   /* Untertitel (EXT-X-MEDIA TYPE=SUBTITLES) */
+    int       nstr;
     char      err[160];
     char     *cur_key_uri;       /* beim Parsen gültiger Schlüssel */
     uint8_t   cur_iv[16];
@@ -47,6 +52,10 @@ struct Hls {
     char     *key_cache_uri;     /* zuletzt geladener Schlüssel */
     uint8_t   key_cache[16];
 };
+
+/* bevorzugte Tonspur (Sprache oder Name), gilt beim nächsten Öffnen */
+static char g_audio_pref[48];
+void hls_set_audio_pref(const char *pref) { snprintf(g_audio_pref, sizeof g_audio_pref, "%s", pref ? pref : ""); }
 
 /* ---------------------------------------------------------------- Hilfen */
 
@@ -161,33 +170,67 @@ static int parse_iv(const char *v, uint8_t out[16])
 
 /* ---------------------------------------------------------------- Master */
 
-typedef struct { char uri[2048]; long bw; int w, h; int ok; char audio[64]; } Variant;
+typedef struct { char uri[2048]; long bw; int w, h; int ok; char audio[64], subs[64]; } Variant;
 
-/* Separate Tonspur für eine AUDIO-Gruppe wählen: Deutsch > DEFAULT=YES > erste */
-static void choose_audio(Hls *h, const char *text, const char *base, const char *group)
+static int pref_matches(const char *lang, const char *name)
+{
+    if (!g_audio_pref[0]) return 0;
+    if (lang[0] && !strcasecmp(lang, g_audio_pref)) return 1;
+    if (name[0] && !strcasecmp(name, g_audio_pref)) return 1;
+    /* "de" passt auch auf "de-DE", "deu", "ger" */
+    if (lang[0] && strlen(g_audio_pref) == 2 && !strncasecmp(lang, g_audio_pref, 2)) return 1;
+    return 0;
+}
+
+/* Tonspuren (AUDIO) und Untertitel (SUBTITLES) einer Gruppe sammeln; Tonspur wählen:
+   Vorliebe des Nutzers > Deutsch > DEFAULT=YES > erste */
+static void choose_audio(Hls *h, const char *text, const char *base, const char *group, const char *sgroup)
 {
     int best_score = -1;
     char best_uri[2048] = "", best_lang[16] = "";
+    h->natr = h->nstr = 0;
+    h->cur_atr = -1;
     const char *p = text;
     while (*p) {
         const char *eol = p + strcspn(p, "\r\n");
         if (!strncmp(p, "#EXT-X-MEDIA:", 13)) {
-            char line[2048], v[2048];
+            char line[2048], v[2048], gid[64] = "", type[16] = "";
             snprintf(line, sizeof line, "%.*s", (int)(eol - p), p + 13);
-            if (attr(line, "TYPE", v, sizeof v) && !strcmp(v, "AUDIO") &&
-                attr(line, "GROUP-ID", v, sizeof v) && !strcmp(v, group)) {
-                char lang[16] = "";
-                attr(line, "LANGUAGE", lang, sizeof lang);
-                for (char *c = lang; *c; c++) *c = (char)tolower((unsigned char)*c);
+            attr(line, "TYPE", type, sizeof type);
+            attr(line, "GROUP-ID", gid, sizeof gid);
+            char lang[16] = "", name[48] = "";
+            attr(line, "LANGUAGE", lang, sizeof lang);
+            attr(line, "NAME", name, sizeof name);
+            for (char *c = lang; *c; c++) *c = (char)tolower((unsigned char)*c);
+            int has_uri = attr(line, "URI", v, sizeof v) != NULL;
+            char uri[2048] = "";
+            if (has_uri) hls_join_url(base, v, uri, sizeof uri);
+
+            if (group && !strcmp(type, "AUDIO") && !strcmp(gid, group)) {
+                if (h->natr < HLS_MAX_TRACKS) {
+                    HlsTrack *t = &h->atr[h->natr];
+                    snprintf(t->lang, sizeof t->lang, "%s", lang);
+                    snprintf(t->name, sizeof t->name, "%s", name[0] ? name : (lang[0] ? lang : "Ton"));
+                    snprintf(t->uri, sizeof t->uri, "%s", uri);
+                    h->natr++;
+                }
                 int score = 0;
+                if (pref_matches(lang, name)) score += 8;
                 if (!strncmp(lang, "de", 2) || !strcmp(lang, "ger")) score += 4;
                 if (attr(line, "DEFAULT", v, sizeof v) && !strcmp(v, "YES")) score += 2;
-                int has_uri = attr(line, "URI", v, sizeof v) != NULL;
                 if (score > best_score) {
                     best_score = score;
-                    if (has_uri) hls_join_url(base, v, best_uri, sizeof best_uri);
-                    else best_uri[0] = 0;      /* Ton steckt im Videostream */
+                    snprintf(best_uri, sizeof best_uri, "%s", uri);   /* leer: Ton steckt im Videostream */
                     snprintf(best_lang, sizeof best_lang, "%s", lang);
+                    h->cur_atr = h->natr - 1;
+                }
+            } else if (sgroup && !strcmp(type, "SUBTITLES") && !strcmp(gid, sgroup) && uri[0]) {
+                if (h->nstr < HLS_MAX_TRACKS) {
+                    HlsTrack *t = &h->str[h->nstr];
+                    snprintf(t->lang, sizeof t->lang, "%s", lang);
+                    snprintf(t->name, sizeof t->name, "%s", name[0] ? name : (lang[0] ? lang : "Untertitel"));
+                    snprintf(t->uri, sizeof t->uri, "%s", uri);
+                    h->nstr++;
                 }
             }
         }
@@ -213,6 +256,7 @@ static int choose_variant(Hls *h, const char *text, const char *base, char *out,
             if (attr(line, "RESOLUTION", v, sizeof v)) sscanf(v, "%dx%d", &cand.w, &cand.h);
             cand.ok = 1;
             if (attr(line, "AUDIO", v, sizeof v)) snprintf(cand.audio, sizeof cand.audio, "%s", v);
+            if (attr(line, "SUBTITLES", v, sizeof v)) snprintf(cand.subs, sizeof cand.subs, "%s", v);
             if (attr(line, "CODECS", v, sizeof v)) {
                 for (char *c = v; *c; c++) *c = (char)tolower((unsigned char)*c);
                 if (strstr(v, "hvc1") || strstr(v, "hev1") || strstr(v, "av01") || strstr(v, "vp09"))
@@ -249,7 +293,7 @@ static int choose_variant(Hls *h, const char *text, const char *base, char *out,
     }
     Variant *v = best.uri[0] ? &best : &fallback;
     snprintf(out, outlen, "%s", v->uri);
-    if (v->audio[0]) choose_audio(h, text, base, v->audio);
+    if (v->audio[0] || v->subs[0]) choose_audio(h, text, base, v->audio[0] ? v->audio : NULL, v->subs[0] ? v->subs : NULL);
     if (v->h) snprintf(h->info, sizeof h->info, "%dx%d, %.1f Mbit/s", v->w, v->h, v->bw / 1e6);
     else      snprintf(h->info, sizeof h->info, "%.1f Mbit/s", v->bw / 1e6);
     return 0;
@@ -566,4 +610,15 @@ int64_t hls_seek(Hls *h, int64_t time_us)
 const char *hls_info(const Hls *h)  { return h->info; }
 const char *hls_audio_url(const Hls *h) { return h->audio_url; }
 const char *hls_audio_lang(const Hls *h) { return h->audio_lang; }
+int  hls_audio_tracks(const Hls *h, const HlsTrack **list, int *current)
+{
+    if (list) *list = h->atr;
+    if (current) *current = h->cur_atr;
+    return h->natr;
+}
+int  hls_subtitle_tracks(const Hls *h, const HlsTrack **list)
+{
+    if (list) *list = h->str;
+    return h->nstr;
+}
 const char *hls_error(const Hls *h) { return h->err; }

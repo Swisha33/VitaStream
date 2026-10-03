@@ -521,3 +521,207 @@ void net_stream_close(NetStream *s)
     free(s->headers);
     free(s);
 }
+
+/* ================================================================ Live-Streams
+ * Endlose HTTP-Streams (Internetradio/Icecast/Shoutcast, manche TS-Sender) haben keine Länge
+ * und keine Range-Unterstützung. Sie werden im Hintergrund in einen Ringpuffer geladen. */
+
+typedef struct { int has_len, icy; char ctype[64]; } LiveHdr;
+
+static size_t live_hdr_cb(char *b, size_t sz, size_t nm, void *ud)
+{
+    size_t n = sz * nm;
+    LiveHdr *h = ud;
+    if (n >= 8 && !strncasecmp(b, "HTTP/", 5)) { h->has_len = 0; h->icy = 0; h->ctype[0] = 0; }  /* neue Antwort */
+    if (n >= 3 && !strncasecmp(b, "ICY", 3)) h->icy = 1;                                         /* "ICY 200 OK" */
+    if (n > 15 && !strncasecmp(b, "Content-Length:", 15)) h->has_len = 1;
+    if (n > 15 && !strncasecmp(b, "Content-Range:", 14)) h->has_len = 1;
+    if (n > 4 && !strncasecmp(b, "icy-", 4)) h->icy = 1;
+    if (n > 13 && !strncasecmp(b, "Content-Type:", 13)) {
+        const char *v = b + 13;
+        while (*v == ' ') v++;
+        size_t l = strcspn(v, ";\r\n");
+        if (l >= sizeof h->ctype) l = sizeof h->ctype - 1;
+        memcpy(h->ctype, v, l);
+        h->ctype[l] = 0;
+        for (char *c = h->ctype; *c; c++) *c = (char)tolower((unsigned char)*c);
+    }
+    return n;
+}
+
+int net_detect_live(const char *url_in, const char *headers, char *final_url, int fl)
+{
+    char *url = strdup(url_in);
+    int result = -1;
+    for (int hop = 0; hop <= MAX_REDIR; hop++) {
+        char resolve[300];
+        int pr = prepare_host(url, resolve, sizeof resolve);
+        if (pr != NET_OK) { set_detail("%s", net_strerror(pr), 0); result = -pr - 1; break; }
+        CURL *c = curl_easy_init();
+        if (!c) break;
+        common_opts(c, url);
+        curl_easy_setopt(c, CURLOPT_TIMEOUT, 15L);
+        struct curl_slist *rl = NULL, *hl = build_headers(headers);
+        if (resolve[0]) { rl = curl_slist_append(NULL, resolve); curl_easy_setopt(c, CURLOPT_RESOLVE, rl); }
+        if (hl) curl_easy_setopt(c, CURLOPT_HTTPHEADER, hl);
+        CapBuf cb = { {NULL, 0}, 2048 };
+        LiveHdr lh = { 0, 0, "" };
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, capped_write);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &cb);
+        curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, live_hdr_cb);
+        curl_easy_setopt(c, CURLOPT_HEADERDATA, &lh);
+        g_net_stats.requests++;
+        CURLcode cr = curl_easy_perform(c);
+        long code = 0;
+        char *redir = NULL;
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+        curl_easy_getinfo(c, CURLINFO_REDIRECT_URL, &redir);
+        char *next = (code >= 300 && code < 400 && redir) ? strdup(redir) : NULL;
+        curl_slist_free_all(rl);
+        curl_slist_free_all(hl);
+        curl_easy_cleanup(c);
+        net_buf_free(&cb.b);
+        if (next) { free(url); url = next; continue; }
+        if (cr != CURLE_OK && cr != CURLE_WRITE_ERROR) { set_detail("%s", curl_easy_strerror(cr), 0); break; }
+        if (code >= 400) { set_detail("HTTP %s%ld", "", code); break; }
+        /* endlos: keine Länge und Radio-typische Kennzeichen */
+        int audio = !strncmp(lh.ctype, "audio/", 6) || !strcmp(lh.ctype, "application/ogg") ||
+                    !strcmp(lh.ctype, "application/octet-stream") || !strcmp(lh.ctype, "video/mp2t");
+        result = (!lh.has_len && (lh.icy || audio)) ? 1 : 0;
+        if (final_url) snprintf(final_url, fl, "%s", url);
+        break;
+    }
+    free(url);
+    return result;
+}
+
+#define LIVE_CAP (1024 * 1024)
+
+struct NetLive {
+    char           *url, *headers;
+    char            resolve[300];
+    pthread_t       thread;
+    pthread_mutex_t m;
+    pthread_cond_t  cv;
+    uint8_t        *ring;
+    size_t          head, count;     /* Leseposition, Füllstand */
+    volatile int    abort;
+    int             done, error;
+};
+
+static size_t live_write(char *p, size_t sz, size_t nm, void *ud)
+{
+    NetLive *l = ud;
+    size_t n = sz * nm, off = 0;
+    pthread_mutex_lock(&l->m);
+    while (off < n) {
+        while (l->count == LIVE_CAP && !l->abort) pthread_cond_wait(&l->cv, &l->m);   /* Puffer voll: warten */
+        if (l->abort) { pthread_mutex_unlock(&l->m); return 0; }
+        size_t tail = (l->head + l->count) % LIVE_CAP;
+        size_t space = LIVE_CAP - l->count;
+        size_t chunk = n - off;
+        if (chunk > space) chunk = space;
+        if (chunk > LIVE_CAP - tail) chunk = LIVE_CAP - tail;
+        memcpy(l->ring + tail, p + off, chunk);
+        l->count += chunk;
+        off += chunk;
+        pthread_cond_broadcast(&l->cv);
+    }
+    pthread_mutex_unlock(&l->m);
+    return n;
+}
+
+static void *live_thread(void *arg)
+{
+    NetLive *l = arg;
+    CURL *c = curl_easy_init();
+    if (c) {
+        common_opts(c, l->url);
+        curl_easy_setopt(c, CURLOPT_TIMEOUT, 0L);               /* endlos */
+        curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);       /* aber Abriss erkennen */
+        curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 20L);
+        curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 0L);
+        set_abort(c, &l->abort);
+        struct curl_slist *rl = NULL, *hl = build_headers(l->headers);
+        if (l->resolve[0]) { rl = curl_slist_append(NULL, l->resolve); curl_easy_setopt(c, CURLOPT_RESOLVE, rl); }
+        if (hl) curl_easy_setopt(c, CURLOPT_HTTPHEADER, hl);
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, live_write);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, l);
+        g_net_stats.requests++;
+        CURLcode cr = curl_easy_perform(c);
+        long code = 0;
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+        curl_slist_free_all(rl);
+        curl_slist_free_all(hl);
+        curl_easy_cleanup(c);
+        if ((cr != CURLE_OK && !l->abort) || code >= 400) l->error = 1;
+    } else {
+        l->error = 1;
+    }
+    pthread_mutex_lock(&l->m);
+    l->done = 1;
+    pthread_cond_broadcast(&l->cv);
+    pthread_mutex_unlock(&l->m);
+    return NULL;
+}
+
+NetLive *net_live_open(const char *url, const char *headers)
+{
+    NetLive *l = calloc(1, sizeof *l);
+    if (!l) return NULL;
+    l->url = strdup(url);
+    l->headers = headers ? strdup(headers) : NULL;
+    l->ring = malloc(LIVE_CAP);
+    if (!l->ring || prepare_host(l->url, l->resolve, sizeof l->resolve) != NET_OK) goto fail;
+    pthread_mutex_init(&l->m, NULL);
+    pthread_cond_init(&l->cv, NULL);
+    if (pthread_create(&l->thread, NULL, live_thread, l) != 0) {
+        pthread_mutex_destroy(&l->m);
+        pthread_cond_destroy(&l->cv);
+        goto fail;
+    }
+    return l;
+fail:
+    free(l->ring); free(l->url); free(l->headers); free(l);
+    return NULL;
+}
+
+int net_live_read(NetLive *l, void *buf, int len)
+{
+    pthread_mutex_lock(&l->m);
+    while (l->count == 0 && !l->done && !l->abort) pthread_cond_wait(&l->cv, &l->m);
+    if (l->count == 0) {
+        int r = (l->abort || l->error) ? -1 : 0;
+        pthread_mutex_unlock(&l->m);
+        return r;
+    }
+    size_t n = (size_t)len < l->count ? (size_t)len : l->count;
+    size_t first = LIVE_CAP - l->head;
+    if (first > n) first = n;
+    memcpy(buf, l->ring + l->head, first);
+    if (n > first) memcpy((uint8_t *)buf + first, l->ring, n - first);
+    l->head = (l->head + n) % LIVE_CAP;
+    l->count -= n;
+    pthread_cond_broadcast(&l->cv);
+    pthread_mutex_unlock(&l->m);
+    return (int)n;
+}
+
+void net_live_abort(NetLive *l)
+{
+    if (!l) return;
+    pthread_mutex_lock(&l->m);
+    l->abort = 1;
+    pthread_cond_broadcast(&l->cv);
+    pthread_mutex_unlock(&l->m);
+}
+
+void net_live_close(NetLive *l)
+{
+    if (!l) return;
+    net_live_abort(l);
+    pthread_join(l->thread, NULL);
+    pthread_mutex_destroy(&l->m);
+    pthread_cond_destroy(&l->cv);
+    free(l->ring); free(l->url); free(l->headers); free(l);
+}

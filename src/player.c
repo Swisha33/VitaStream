@@ -103,7 +103,7 @@ void player_draw(void)
         ui_spinner("Puffern...");
     } else if (st == MS_PLAYING && !media_has_video()) {
         const char *t = "Nur Ton";
-        ui_text(SCREEN_W / 2 - ui_text_width(t) / 2, SCREEN_H / 2, COL_DIM, t);
+        ui_text(SCREEN_W / 2 - ui_text_width(t) / 2, SCREEN_H / 2, 0xFFB0B0B0, t);
     }
 
     if (s_debug) {
@@ -112,8 +112,8 @@ void player_draw(void)
         ui_rect(0, 0, SCREEN_W, 52, 0xC0000000);
         char *nl = strchr(buf, '\n');
         if (nl) *nl = 0;
-        ui_text_scaled(10, 20, COL_TEXT, 0.8f, buf);
-        if (nl) ui_text_scaled(10, 42, COL_DIM, 0.8f, nl + 1);
+        ui_text_scaled(10, 20, 0xFFF0F0F0, 0.8f, buf);
+        if (nl) ui_text_scaled(10, 42, 0xFFB0B0B0, 0.8f, nl + 1);
     }
 }
 

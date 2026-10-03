@@ -5,6 +5,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 VsConfig g_cfg;
 
@@ -15,7 +16,7 @@ static void set_defaults(void)
     strcpy(g_cfg.dns_primary,   "94.140.14.14");
     strcpy(g_cfg.dns_secondary, "94.140.15.15");
     strcpy(g_cfg.user_agent,
-           "Mozilla/5.0 (PlayStation Vita 3.74) AppleWebKit/537.73 (KHTML, like Gecko) VitaStream/0.1");
+           "Mozilla/5.0 (PlayStation Vita 3.74) AppleWebKit/537.73 (KHTML, like Gecko) VitaStream/" VS_APP_VERSION);
     g_cfg.timeout_sec = 20;
     g_cfg.ssl_verify  = 1;
 }
@@ -47,11 +48,27 @@ void config_install_defaults(void)
         "config.ini", "blocklist.txt", "sites.txt", "playlists.txt", "cacert.pem",
     };
     /* Mitgelieferte Plugins: bei jeder neuen App-Version aktualisieren
-       (eigene Plugins mit anderen Dateinamen bleiben unberührt) */
-    static const char *plugins[] = {
-        "plugins/json.lua", "plugins/m3ulib.lua", "plugins/direct.lua", "plugins/m3u.lua",
-        "plugins/mediathek.lua", "plugins/website.lua", "plugins/finder.lua", "plugins/southpark.lua",
+       (eigene Plugins mit anderen Dateinamen bleiben unberührt). Die Liste dient nur als
+       Rückfall - normalerweise wird der Plugin-Ordner der App durchsucht. */
+    static const char *plugins_fallback[] = {
+        "json.lua", "m3ulib.lua", "direct.lua", "m3u.lua", "mediathek.lua", "website.lua", "finder.lua",
+        "southpark.lua", "jellyfin.lua", "explorer.lua", "youtube.lua", "pluto.lua", "audiothek.lua",
     };
+    char found[48][64];
+    int nfound = 0;
+    DIR *d = opendir(VS_APP_DATA "/plugins");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) && nfound < 48) {
+            size_t l = strlen(e->d_name);
+            if (l > 4 && l < sizeof found[0] && !strcmp(e->d_name + l - 4, ".lua"))
+                snprintf(found[nfound++], sizeof found[0], "%s", e->d_name);
+        }
+        closedir(d);
+    }
+    if (nfound == 0)
+        for (size_t i = 0; i < sizeof plugins_fallback / sizeof *plugins_fallback; i++)
+            snprintf(found[nfound++], sizeof found[0], "%s", plugins_fallback[i]);
     mkdir("ux0:data", 0777);
     mkdir(VS_DATA_DIR, 0777);
     mkdir(VS_DATA_DIR "/plugins", 0777);
@@ -69,10 +86,10 @@ void config_install_defaults(void)
     if (vf) { if (!fgets(ver, sizeof ver, vf)) ver[0] = 0; fclose(vf); }
     ver[strcspn(ver, "\r\n")] = 0;
     int update = strcmp(ver, VS_APP_VERSION) != 0;
-    for (size_t i = 0; i < sizeof plugins / sizeof *plugins; i++) {
-        snprintf(dst, sizeof dst, VS_DATA_DIR "/%s", plugins[i]);
+    for (int i = 0; i < nfound; i++) {
+        snprintf(dst, sizeof dst, VS_DATA_DIR "/plugins/%s", found[i]);
         if (!update && file_exists(dst)) continue;
-        snprintf(src, sizeof src, VS_APP_DATA "/%s", plugins[i]);
+        snprintf(src, sizeof src, VS_APP_DATA "/plugins/%s", found[i]);
         copy_file(src, dst);
     }
     if (update) {
@@ -111,6 +128,8 @@ int config_load(void)
         else if (!strcmp(k, "user_agent"))    snprintf(g_cfg.user_agent, sizeof g_cfg.user_agent, "%s", v);
         else if (!strcmp(k, "ssl_verify"))    g_cfg.ssl_verify = atoi(v) != 0;
         else if (!strcmp(k, "proxy"))         snprintf(g_cfg.proxy, sizeof g_cfg.proxy, "%s", v);
+        else if (!strcmp(k, "audio_lang"))    snprintf(g_cfg.audio_lang, sizeof g_cfg.audio_lang, "%s", v);
+        else if (!strcmp(k, "theme"))         g_cfg.theme = atoi(v);
         else if (!strcmp(k, "timeout"))       g_cfg.timeout_sec = atoi(v) > 0 ? atoi(v) : 20;
     }
     fclose(f);
@@ -134,10 +153,14 @@ int config_save(void)
         "ssl_verify=%d\n"
         "# proxy: alle Verbindungen ueber einen Proxy (socks5h://host:port oder http://host:port)\n"
         "proxy=%s\n"
+        "# audio_lang: bevorzugte Tonspur (z. B. en, de), leer = automatisch\n"
+        "audio_lang=%s\n"
+        "# theme: Farbthema (0 = Standard)\n"
+        "theme=%d\n"
         "user_agent=%s\n",
         g_cfg.adblock_enabled, g_cfg.custom_dns_enabled,
         g_cfg.dns_primary, g_cfg.dns_secondary,
-        g_cfg.timeout_sec, g_cfg.ssl_verify, g_cfg.proxy, g_cfg.user_agent);
+        g_cfg.timeout_sec, g_cfg.ssl_verify, g_cfg.proxy, g_cfg.audio_lang, g_cfg.theme, g_cfg.user_agent);
     fclose(f);
     return 0;
 }

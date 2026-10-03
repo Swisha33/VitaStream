@@ -10,6 +10,9 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
 - **Quellen-Plugins in Lua** – Suchen, Durchblättern, Abspielen, mit Vorschaubildern und „Weitere laden“.
 - **Mitgelieferte Quellen**
   - *Mediatheken nach Sprache* – Deutsch: ARD, ZDF, arte, 3sat, KiKA … pro Sender Neueste, Sendungen, Kategorien; English, Hrvatski, Français, Español u. a.: freie Filme & Shows aus dem Internet Archive (Kategorien + Suche)
+  - *YouTube* – offizielle Kanäle (Pokémon, LEGO, Shaun das Schaf, Cartoon Network, KiKA …), Anime-Kanäle (TMS, Crunchyroll, Muse Asia …), Suche, Playlisten mit Folgen in Reihenfolge; bis 720p
+  - *Pluto TV auf Abruf* – kostenlose Filme & Serien nach Genre, Staffeln und Folgen
+  - *Audiothek* – Internetradio weltweit (nach Land, Genre, Suche) und Podcasts (Suche, Charts, ARD/ZDF/DLF …), getrennt von der Video-Mediathek
   - *Sender-Finder* – tausende frei empfangbare Sender (iptv-org) nach Kategorie, Land, Sprache; Pluto TV, Samsung TV Plus, Rakuten TV; Anime & Zeichentrick
   - *South Park* – alle Staffeln von southpark.de (Deutsch/Englisch)
   - *Jellyfin* – eigener Jellyfin-Server: Mediathek 1:1 abgebildet (Ansichten → Serien → Staffeln → Folgen), Server transkodiert bei Bedarf nach H.264/720p
@@ -19,6 +22,9 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
   - *Eigene Websites* – per Muster in `sites.txt`
 - **Favoriten & Playlists** – mit Quadrat einzelne Einträge oder ganze Listen speichern; eigene Playlists bearbeiten (löschen, umbenennen, verschieben), defekte Streams automatisch entfernen, Online-Listen als bearbeitbare Kopie übernehmen
 - **Player** – MP4, HLS (inkl. AES-128 und separater Tonspuren), MPEG-TS; Hardware-H.264 bis 720p, Software-Ersatz für SD/Interlaced; AAC/MP3/AC3; Werbeunterbrechungen (Zeitsprünge) werden überbrückt
+- **Ton & Untertitel** – im Player mit △: Tonspur wählen (HLS-Sprachspuren oder mehrere Spuren in MP4/TS, Sprache wird gemerkt), Untertitel ein/aus (WebVTT aus HLS, TTML/WebVTT/SRT der Mediatheken)
+- **Internetradio** – endlose Streams (Icecast/Shoutcast) laufen direkt, auch in eigenen M3U-Listen
+- **Themen** – Standard, PS1, PS2, PS3 (XMB), PSP, Vita, Dunkel (OLED), Hell – in den Einstellungen
 - **Gesehen-Markierung** – automatisch ab 90 % oder am Ende, manuell über □ (auch für ganze Listen); Folgen von South Park und Mediatheken-Reihen in Staffel-/Folgenreihenfolge
 - **Proxy** – alle Verbindungen optional über einen SOCKS5- oder HTTP-Proxy (Einstellungen), z. B. den eigenen Server
 - **AdBlock** – lokale Blockliste + eigener DNS (AdGuard, Cloudflare, Quad9, eigener Server), einzeln schaltbar
@@ -29,9 +35,9 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
 |---|---|---|
 | Bestätigen (✕ oder ○, je nach Region) | öffnen / abspielen | Pause |
 | Zurück | eine Ebene zurück | Wiedergabe beenden |
-| △ | Suche (in der Quelle) / Einstellungen (Startseite) | – |
+| △ | Suche (in der Quelle) / Einstellungen (Startseite) | Ton & Untertitel |
 | □ | Menü: gesehen/ungesehen, Favoriten, Playlists, Bearbeiten | – |
-| ▲ / ▼ (Steuerkreuz) | Auswahl | vorheriger / nächster Eintrag (Senderwechsel, nächste Folge) |
+| ▲ / ▼ (Steuerkreuz) | Auswahl | zweimal drücken: vorheriger / nächster Eintrag (Schutz vor versehentlichem Umschalten) |
 | SELECT | – | technische Infos (Decoder, Puffer) |
 | L / R | seitenweise blättern | ±60 s |
 | ◀ / ▶ | DNS-Preset wechseln (Einstellungen) | ±10 s |
