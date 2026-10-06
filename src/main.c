@@ -30,6 +30,7 @@
 #include "sub.h"
 #include "history.h"
 #include "dl.h"
+#include "epg.h"
 
 int _newlib_heap_size_user = 192 * 1024 * 1024;
 
@@ -70,6 +71,12 @@ static int     zap_target = -1, zap_dir, zap_timer;   /* Senderwechsel: wartet a
 static StreamInfo cur_si;               /* aktueller Stream (für Spurwechsel/Untertitel) */
 static int64_t resume_ms;               /* nach Neuöffnen hierhin springen (Tonspurwechsel) */
 static int     osd_timer;               /* Einblendung im Player (Frames) */
+static char    sel_info[300];           /* Programminfo zum gewählten Listeneintrag */
+static const void *sel_info_item;
+static int     sel_info_age;
+static char    play_info[300];          /* Programminfo zum laufenden Sender */
+static int     play_info_age = 100000;
+static char    zap_info[300];
 static int     ref_hops;                /* Schutz vor Verweis-Schleifen (vsplugin://) */
 static HistEntry cur_hist;              /* Verlaufseintrag des laufenden Videos */
 static int     from_history;            /* Wiedergabe aus "Zuletzt gesehen" gestartet */
@@ -379,6 +386,8 @@ static void start_play(int index)
     if (plugins_start_resolve(cur_src, it) != 0) return;
     play_index = index;
     lv->cursor = index;
+    play_info[0] = 0;
+    play_info_age = 1790;                       /* kurz nach dem Start abfragen */
     from_history = 0;
     snprintf(play_key, sizeof play_key, "%s", k ? k : "");
     /* Verlaufseintrag vorbereiten (Stream-Adresse kommt nach dem Auflösen dazu) */
@@ -409,6 +418,7 @@ static void play_history(int i)
     if (!ask_resume(e->key)) return;
     cur_hist = *e;
     from_history = 1;
+    play_info[0] = 0;
     play_index = -1;
     snprintf(play_key, sizeof play_key, "%s", e->key);
     snprintf(play_title, sizeof play_title, "%s", e->title);
@@ -822,7 +832,7 @@ static void item_menu(void)
             return;
         }
         snprintf(dl_title, sizeof dl_title, "%s", it->title);
-        if (plugins_start_resolve(cur_src, it) == 0) start_job_screen(PEND_DOWNLOAD, "Download wird vorbereitet ...");
+        if (plugins_start_download(cur_src, it) == 0) start_job_screen(PEND_DOWNLOAD, "Download wird vorbereitet ...");
         return;
     }
     if (c == a_seen_all || c == a_unseen_all) {
@@ -980,7 +990,7 @@ static void choose_music(void)
 }
 
 enum {
-    SET_THEME, SET_THEME_EDIT, SET_MUSIC, SET_AUDIO_LANG, SET_ADBLOCK, SET_DNS, SET_PRESET, SET_CUSTOM_DNS, SET_RELOAD_BL, SET_PROXY,
+    SET_THEME, SET_THEME_EDIT, SET_MUSIC, SET_AUDIO_LANG, SET_ADBLOCK, SET_DNS, SET_PRESET, SET_CUSTOM_DNS, SET_RELOAD_BL, SET_PROXY, SET_EPG,
     SET_ADD_PLAYLIST, SET_RELOAD_PLUGINS, SET_STATS, SET_COUNT
 };
 
@@ -1039,6 +1049,11 @@ static void label_settings(void *ctx, int i, const char **t, const char **sub)
     case SET_PROXY:
         snprintf(tb, sizeof tb, "Proxy: %s", g_cfg.proxy[0] ? g_cfg.proxy : "AUS");
         snprintf(sb, sizeof sb, "z. B. socks5h://server:1080 oder http://server:3128 - leer = aus");
+        break;
+    case SET_EPG:
+        snprintf(tb, sizeof tb, "Programmfuehrer: %s", g_cfg.epg_url[0] ? g_cfg.epg_url : "nur aus den Senderlisten");
+        snprintf(sb, sizeof sb, "%s", epg_status()[0] ? epg_status()
+                 : "XMLTV-Adresse (.xml/.xml.gz) fuer Listen ohne eigenen Programmfuehrer - leer = aus");
         break;
     case SET_STATS:
         snprintf(tb, sizeof tb, "Anfragen: %d   Gesperrt: %d", g_net_stats.requests, g_net_stats.blocked);
@@ -1123,6 +1138,16 @@ static void settings_action(int i, int dir)
         }
         break;
     }
+    case SET_EPG: {
+        char u[512];
+        if (ui_input_text("Programmfuehrer: XMLTV-Adresse (leer = aus)", g_cfg.epg_url[0] ? g_cfg.epg_url : "https://", u, sizeof u)) {
+            if (!strcmp(u, "https://") || !strcmp(u, "http://")) u[0] = 0;
+            snprintf(g_cfg.epg_url, sizeof g_cfg.epg_url, "%s", u);
+            epg_set_default(u);
+            if (u[0]) epg_load(u);
+        }
+        break;
+    }
     case SET_RELOAD_PLUGINS:
         stack_clear();
         plugins_reload();
@@ -1150,6 +1175,7 @@ int main(void)
     ui_set_theme(g_cfg.theme);
     reload_blocklist();
     net_init();
+    epg_set_default(g_cfg.epg_url);
     plugins_init();
     thumbs_init();
     watched_load(VS_DATA_DIR "/watched.txt");
@@ -1193,6 +1219,19 @@ int main(void)
                 }
             }
             ui_set_status(st[0] ? st : d);
+        }
+        {
+            /* Menümusik aus einem Plugin (Audiothek -> freie Musik) laden und nach dem Download einstellen */
+            char mu[2048], mn[160], mt[160], sd[32], fn[200];
+            if (plugins_take_music_request(mu, sizeof mu, mn, sizeof mn, mt, sizeof mt)) {
+                if (dl_start_to(mu, NULL, mt, "music", mn) != 0) ui_message("Menuemusik", "Es laeuft bereits ein Download - bitte danach erneut versuchen.");
+            }
+            if (dl_take_finished(sd, sizeof sd, fn, sizeof fn) && !strcmp(sd, "music")) {
+                stop_bgm();
+                bgm_fails = 0;
+                snprintf(g_cfg.menu_music, sizeof g_cfg.menu_music, "%s", fn);
+                config_save();
+            }
         }
         bgm_update(scr);
 
@@ -1296,6 +1335,17 @@ int main(void)
 
             if (scr != SCR_LIST || depth == 0) break;
             lv = &stack[depth - 1];
+            if (lv->list.count && lv->cursor < lv->list.count) {
+                PluginItem *ci = &lv->list.items[lv->cursor];
+                /* bei Wechsel der Auswahl kurz warten (schnelles Blättern), sonst alle 30 s auffrischen */
+                if (ci != sel_info_item) { sel_info_item = ci; sel_info_age = -12; sel_info[0] = 0; }
+                if (ci->kind == ITEM_VIDEO && (sel_info_age == 0 || sel_info_age >= (sel_info[0] ? 1800 : 180))) {
+                    plugins_item_info(cur_src, ci, sel_info, sizeof sel_info);
+                    sel_info_age = 0;
+                }
+                sel_info_age++;
+                if (sel_info[0]) ui_set_info(sel_info);
+            }
             ui_begin();
             char right[32];
             snprintf(right, sizeof right, "%d Eintraege", lv->list.count);
@@ -1505,6 +1555,9 @@ int main(void)
                 zap_dir = dir;
                 zap_target = neighbour_video(play_index, dir);
                 zap_timer = 120;   /* ca. 2 s */
+                zap_info[0] = 0;
+                if (zap_target >= 0)
+                    plugins_item_info(cur_src, &stack[depth - 1].list.items[zap_target], zap_info, sizeof zap_info);
             }
 
             int quit = (in.pressed & BTN_CANCEL) != 0;
@@ -1535,7 +1588,16 @@ int main(void)
             /* Bildschirm während der Wiedergabe nicht abdunkeln */
             sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);   /* alle Zeitgeber: Abdunkeln, Bildschirm aus, Ruhemodus */
 
+            /* Programminfo des laufenden Senders (alle 30 s) */
+            if (++play_info_age >= (play_info[0] ? 1800 : 300)) {
+                play_info_age = 0;
+                play_info[0] = 0;
+                if (play_index >= 0 && depth > 0 && !from_history && play_index < stack[depth - 1].list.count)
+                    plugins_item_info(cur_src, &stack[depth - 1].list.items[play_index], play_info, sizeof play_info);
+            }
+
             ui_begin();
+            ui_rect(0, 0, SCREEN_W, SCREEN_H, 0xFF000000);   /* Ränder bei anderen Bildformaten schwarz statt Themenfarbe */
             player_draw();
             draw_subtitles(osd_timer > 0 || player_paused());
             if (osd_timer > 0 || player_paused()) {
@@ -1547,8 +1609,9 @@ int main(void)
                 else     snprintf(line, sizeof line, "%s  (Live)", a);
                 /* Fehlerdetails bleiben nach Ende sichtbar, siehe player_error() */
 
-                ui_rect(0, 0, SCREEN_W, 40, 0xB0000000);
+                ui_rect(0, 0, SCREEN_W, play_info[0] ? 62 : 40, 0xB0000000);
                 ui_text_clipped(20, 28, SCREEN_W - 260, OSD_TEXT, play_title);
+                if (play_info[0]) ui_text_clipped(20, 52, SCREEN_W - 40, OSD_DIM, play_info);
                 if (depth > 0) ui_text_scaled(SCREEN_W - 230, 28, OSD_DIM, 0.8f, "2x Hoch/Runter: wechseln");
                 ui_rect(0, SCREEN_H - 70, SCREEN_W, 70, 0xB0000000);
                 if (dur) {
@@ -1570,8 +1633,9 @@ int main(void)
                              stack[depth - 1].list.items[zap_target].title, zap_dir < 0 ? "Hoch" : "Runter");
                 else
                     snprintf(zl, sizeof zl, "Kein %s Eintrag in der Liste", zap_dir < 0 ? "vorheriger" : "weiterer");
-                ui_rect(0, SCREEN_H / 2 - 30, SCREEN_W, 50, 0xC0000000);
+                ui_rect(0, SCREEN_H / 2 - 30, SCREEN_W, zap_info[0] && zap_target >= 0 ? 74 : 50, 0xC0000000);
                 ui_text_clipped(30, SCREEN_H / 2 + 3, SCREEN_W - 60, OSD_TEXT, zl);
+                if (zap_info[0] && zap_target >= 0) ui_text_clipped(30, SCREEN_H / 2 + 28, SCREEN_W - 60, OSD_DIM, zap_info);
             }
             ui_end();
             break;
@@ -1608,6 +1672,7 @@ int main(void)
     stack_clear();
     thumbs_shutdown();
     dl_shutdown();
+    epg_shutdown();
     plugins_shutdown();
     net_term();
     config_save();

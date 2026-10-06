@@ -43,48 +43,81 @@ end
 
 local session = nil
 
-local function boot()
-  local dev = device_id()
-  local params = {
-    { "appName", "web" }, { "appVersion", "8.0.0-111b2b9dc00bd0bea9030b30662159ed9e7c8bc6" }, { "deviceType", "web" }, { "deviceModel", "web" },
-    { "deviceMake", "chrome" }, { "deviceVersion", "122.0.0" }, { "deviceId", dev }, { "clientID", dev },
-    { "clientModelNumber", "1.0.0" }, { "serverSideAds", "false" }, { "blockingMode", "" },
-  }
-  local body, status = vs.http_get(BOOT .. "?" .. query(params), WEB_HDR)
-  if not body then return nil, "Pluto nicht erreichbar: " .. tostring(status) end
+-- kurzer Auszug aus Plutos Fehlerantwort ({"message":...} o. ae.), fuer verstaendliche Meldungen
+local function reason(body)
+  if not body or body == "" then return "" end
   local ok, j = pcall(json.decode, body)
-  if not ok or type(j) ~= "table" or not j.sessionToken then
-    if status == 401 or status == 403 then
-      return nil, "Pluto verweigert die Anmeldung (HTTP " .. status .. ") - evtl. in deiner Region nicht verfuegbar oder Proxy/VPN erkannt"
-    end
-    return nil, "Pluto: keine Sitzung (HTTP " .. tostring(status) .. ")"
-  end
-  local sp = j.stitcherParams or ""
-  if sp:sub(1, 1) == "?" then sp = sp:sub(2) end
-  if sp == "" then sp = query(params) end
-  session = { token = j.sessionToken, params = sp,
-              stitcher = (j.servers and j.servers.stitcher) or STITCHER_FALLBACK }
-  return session
+  local m = ok and type(j) == "table" and (j.message or j.error or j.errorMessage or j.code)
+  if type(m) == "table" then m = m.message or json.encode(m) end
+  m = m and tostring(m) or body:gsub("%s+", " ")
+  return " - " .. m:sub(1, 100)
 end
 
-local function api(path, params)
-  for attempt = 1, 2 do
-    if not session then
-      local s, err = boot()
-      if not s then return nil, err end
-    end
-    local url = API .. path .. (params and ("?" .. query(params)) or "")
-    local body, status = vs.http_get(url, WEB_HDR .. "\nAuthorization: Bearer " .. session.token)
-    if body and status ~= 401 and status ~= 403 then
-      if status and status >= 400 then return nil, "Pluto antwortete HTTP " .. status end
+local last_boot_err = ""
+
+-- Sitzung holen. Zwei Varianten: die schlichte Anfrage (so geprueft) und die der Web-App.
+local function boot()
+  local dev = device_id()
+  local variants = {
+    { hdr = "Accept: application/json\nUser-Agent: " .. UA,
+      params = { { "appName", "web" }, { "appVersion", "9.1.0" }, { "deviceVersion", "122.0.0" },
+                 { "deviceModel", "web" }, { "deviceMake", "chrome" }, { "deviceType", "web" },
+                 { "clientID", dev }, { "clientModelNumber", "1.0.0" }, { "serverSideAds", "false" } } },
+    { hdr = WEB_HDR,
+      params = { { "appName", "web" }, { "appVersion", "8.0.0-111b2b9dc00bd0bea9030b30662159ed9e7c8bc6" },
+                 { "deviceType", "web" }, { "deviceModel", "web" }, { "deviceMake", "chrome" }, { "deviceVersion", "122.0.0" },
+                 { "deviceId", dev }, { "clientID", dev }, { "clientModelNumber", "1.0.0" }, { "serverSideAds", "false" },
+                 { "blockingMode", "" } } },
+  }
+  local errs = {}
+  for i, v in ipairs(variants) do
+    local body, status = vs.http_get(BOOT .. "?" .. query(v.params), v.hdr)
+    if not body then
+      errs[#errs + 1] = "Variante " .. i .. ": nicht erreichbar (" .. tostring(status) .. ")"
+    else
       local ok, j = pcall(json.decode, body)
-      if not ok then return nil, "Pluto-Antwort unlesbar" end
-      return j
+      if ok and type(j) == "table" and j.sessionToken then
+        local sp = j.stitcherParams or ""
+        if sp:sub(1, 1) == "?" then sp = sp:sub(2) end
+        if sp == "" then sp = query(v.params) end
+        session = { token = j.sessionToken, params = sp,
+                    stitcher = (j.servers and j.servers.stitcher) or STITCHER_FALLBACK,
+                    region = j.session and (j.session.activeRegion or j.session.country) }
+        if j.session and j.session.activeRegion then vs.log("Pluto-Region: " .. tostring(j.session.activeRegion)) end
+        return session
+      end
+      errs[#errs + 1] = "Variante " .. i .. ": HTTP " .. tostring(status) .. reason(body)
     end
-    session = nil      -- Token abgelaufen oder Region gewechselt: neu anmelden
-    if not body then return nil, "Pluto nicht erreichbar: " .. tostring(status) end
   end
-  return nil, "Pluto hat die Sitzung abgelehnt"
+  last_boot_err = table.concat(errs, "; ")
+  return nil, "Pluto-Anmeldung (boot.pluto.tv) abgelehnt: " .. last_boot_err
+end
+
+-- Katalog-Abruf: erst api.pluto.tv (v3), bei Ablehnung die neuere v4-Schnittstelle
+local VOD_V4 = "https://service-vod.clusters.pluto.tv"
+
+local function api(path, params, v4path)
+  local tried = {}
+  for _, target in ipairs({ { API, path }, v4path and { VOD_V4, v4path } or nil }) do
+    for attempt = 1, 2 do
+      if not session then
+        local s, err = boot()
+        if not s then return nil, err end
+      end
+      local url = target[1] .. target[2] .. (params and ("?" .. query(params)) or "")
+      local body, status = vs.http_get(url, WEB_HDR .. "\nAuthorization: Bearer " .. session.token)
+      if not body then return nil, "Pluto nicht erreichbar: " .. tostring(status) end
+      if status and status < 400 then
+        local ok, j = pcall(json.decode, body)
+        if not ok then return nil, "Pluto-Antwort unlesbar (" .. target[2] .. ")" end
+        return j
+      end
+      tried[#tried + 1] = target[2]:match("^/(v%d)") .. " HTTP " .. tostring(status) .. reason(body)
+      if status ~= 401 and status ~= 403 then break end
+      if attempt == 1 then session = nil end     -- Token abgelaufen? einmal neu anmelden
+    end
+  end
+  return nil, "Pluto-Katalog abgelehnt: " .. table.concat(tried, "; ")
 end
 
 local function abs_img(p)
@@ -155,7 +188,7 @@ local function load_page(page)
   vs.log("Lade Pluto-Katalog (Seite " .. (page + 1) .. ") ...")
   local j, err = api("/v3/vod/categories", {
     { "includeItems", "true" }, { "deviceType", "web" }, { "offset", tostring(CAT_PAGE) }, { "page", tostring(page + 1) },
-  })
+  }, "/v4/vod/categories")
   if not j then return nil, err end
   local cats = {}
   for _, c in ipairs(j.categories or {}) do
@@ -262,7 +295,8 @@ return {
     -- Serie: Staffeln (eine Anfrage liefert alle Folgen aller Staffeln)
     local sid, snum = id:match("^series:([^:]+):?(%d*)$")
     if sid then
-      local j, err = api("/v3/vod/series/" .. enc(sid) .. "/seasons", { { "includeItems", "true" }, { "deviceType", "web" } })
+      local j, err = api("/v3/vod/series/" .. enc(sid) .. "/seasons", { { "includeItems", "true" }, { "deviceType", "web" } },
+                         "/v4/vod/series/" .. enc(sid) .. "/seasons")
       if not j then return nil, err end
       local seasons = j.seasons or {}
       table.sort(seasons, function(a, b) return (tonumber(a.number) or 0) < (tonumber(b.number) or 0) end)

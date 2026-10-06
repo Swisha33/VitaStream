@@ -17,7 +17,7 @@ local LAST   = "jellyfin_last.txt"   -- nur Server-Adresse und Benutzername als 
 local OLD_SESS = "jellyfin_session.txt"
 local CLIENT = "VitaStream"
 local DEVICE = "PSVita"
-local VERSION = "0.8"
+local VERSION = "0.9"
 local PAGE = 100            -- Eintraege pro Seite
 local MAXH, MAXW = 720, 1280
 
@@ -66,11 +66,21 @@ local function auth_header(token)
   return "Authorization: " .. h
 end
 
+-- Zeitlimit grosszuegig (langsame NAS, grosse Bibliotheken); bei Zeitueberschreitung einmal wiederholen
+local TIMEOUT = 45
+local function is_timeout(e) e = tostring(e or ""); return e:find("curl 28") or e:lower():find("timeout") or e:lower():find("timed out") end
+
 local function api_get(sess, path)
   local sep = path:find("?", 1, true) and "&" or "?"
   local url = sess.server .. path .. sep .. "api_key=" .. sess.token
-  local body, status = vs.http_get(url, auth_header(sess.token) .. "\nAccept: application/json")
-  if not body then return nil, status end
+  local body, status = vs.http_get(url, auth_header(sess.token) .. "\nAccept: application/json", TIMEOUT)
+  if not body and is_timeout(status) then
+    body, status = vs.http_get(url, auth_header(sess.token) .. "\nAccept: application/json", TIMEOUT)
+  end
+  if not body then
+    if is_timeout(status) then return nil, "Server antwortet nicht rechtzeitig (Zeitueberschreitung) - laeuft er, ist das WLAN stabil?" end
+    return nil, status
+  end
   if status == 401 then return nil, "Nicht angemeldet (Token abgelaufen) - bitte neu anmelden" end
   if status and status >= 400 then return nil, "Server-Fehler HTTP " .. status end
   local ok, data = pcall(json.decode, body)
@@ -291,7 +301,7 @@ local DEVICE_PROFILE = {
 local function api_post(sess, path, body)
   local url = sess.server .. path
   local resp, status = vs.http_post(url, json.encode(body),
-    auth_header(sess.token) .. "\nContent-Type: application/json\nAccept: application/json")
+    auth_header(sess.token) .. "\nContent-Type: application/json\nAccept: application/json", 60)
   if not resp then return nil, status end
   if status == 401 then return nil, "Nicht angemeldet (Token abgelaufen) - bitte neu anmelden" end
   if status and status >= 400 then return nil, "Server-Fehler HTTP " .. status end
@@ -353,6 +363,8 @@ local function setup_items(msg)
   local last = last_login()
   local items = {}
   if msg then items[#items + 1] = { title = msg, subtitle = "Bitte (erneut) anmelden", id = "nop", kind = "folder" } end
+  items[#items + 1] = { title = "Server im Heimnetz suchen", subtitle = "findet Jellyfin automatisch (gleiches WLAN)",
+                        id = "discover", kind = "folder" }
   items[#items + 1] = { title = "1. Server-Adresse eingeben ...",
                         subtitle = last.server and ("zuletzt: " .. last.server) or "z. B. 192.168.1.50:8096 oder https://jellyfin.example.de",
                         id = "login_server", kind = "search" }
@@ -378,9 +390,28 @@ return {
   browse = function(id)
     if id == nil then return root() end
     if id == "nop" then return nil, "Bitte unten anmelden" end
+    if id == "discover" then
+      vs.log("Suche Jellyfin-Server im Heimnetz ...")
+      local found = vs.discover(7359, "who is JellyfinServer?", 2000)
+      local items, seen = {}, {}
+      for _, r in ipairs(found) do
+        local ok, j = pcall(json.decode, r.data or "")
+        local addr = ok and type(j) == "table" and j.Address or ("http://" .. r.ip .. ":8096")
+        addr = tostring(addr):gsub("/+$", "")
+        if not seen[addr] then
+          seen[addr] = true
+          items[#items + 1] = { title = "Anmelden bei " .. tostring(ok and j.Name or r.ip) .. " ...", subtitle = addr,
+                                id = "login_user:" .. addr, kind = "search" }
+        end
+      end
+      if #items == 0 then
+        return nil, "Kein Jellyfin-Server gefunden. Ist die Vita im selben WLAN? Sonst Adresse von Hand eingeben."
+      end
+      return items
+    end
     if id == "logout" then
       local sess = mem_session or read_session()
-      if sess then vs.http_post(sess.server .. "/Sessions/Logout", "", auth_header(sess.token)) end
+      if sess then vs.http_post(sess.server .. "/Sessions/Logout", "", auth_header(sess.token), 5) end   -- nicht lange warten
       vs.secret_set(SECRET, nil)
       mem_session, checked = nil, false
       return setup_items("Abgemeldet")
@@ -402,10 +433,12 @@ return {
       local base = q:gsub("/+$", "")
       if not base:match("^https?://") then base = "http://" .. base end
       local candidates = { base }
-      if not base:match("^https?://[^/]+:%d+") then candidates[2] = base .. ":8096" end   -- Standard-Port
+      if not base:match("^https?://[^/]+:%d+") then
+        candidates = { base .. ":8096", base }        -- Standard-Port zuerst, dann wie eingegeben (Reverse-Proxy)
+      end
       local server, pub, last_err
       for _, c in ipairs(candidates) do
-        local info, status = vs.http_get(c .. "/System/Info/Public", "Accept: application/json")
+        local info, status = vs.http_get(c .. "/System/Info/Public", "Accept: application/json", 8)
         local ok, p = pcall(json.decode, info or "")
         if info and ok and type(p) == "table" and (p.ServerName or p.Version) then server, pub = c, p; break end
         last_err = status
@@ -438,6 +471,21 @@ return {
     local sess, err = ensure_session()
     if not sess then return nil, err == "setup" and "Bitte zuerst anmelden" or err end
     return do_search(sess, q)
+  end,
+
+  -- Download: Datei, die die Vita offline abspielen kann. Passt das Original, wird es geladen,
+  -- sonst wandelt der Server in eine MP4 (H.264/AAC, max. 720p) um.
+  download = function(item)
+    local sess, err = ensure_session()
+    if not sess then return nil, err == "setup" and "Bitte zuerst anmelden" or err end
+    local item_id = (item.id or ""):match("^play:(.+)$") or item.id
+    local ok, res = pcall(stream_for, sess, item_id)
+    if ok and res and res.url and res.url:find("static=true", 1, true) then return res end
+    local url = string.format(
+      "%s/Videos/%s/stream.mp4?Static=false&Container=mp4&VideoCodec=h264&AudioCodec=aac&MaxWidth=%d&MaxHeight=%d" ..
+      "&VideoBitrate=2500000&AudioBitrate=160000&MaxAudioChannels=2&DeviceId=%s&api_key=%s",
+      sess.server, item_id, MAXW, MAXH, vs.urlencode(DEVICE .. "-" .. CLIENT), sess.token)
+    return { url = url }
   end,
 
   resolve = function(item)

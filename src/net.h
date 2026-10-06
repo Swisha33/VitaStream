@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Obergrenze für Adressen: Pluto- und YouTube-Adressen tragen lange Zugriffs-Token
+   (über 2000 Zeichen) - zu kleine Puffer schneiden sie ab (HTTP 401/403) */
+#define VS_URL_MAX 8192
+
 #define NET_OK        0
 #define NET_ERR      -1
 #define NET_BLOCKED  -2   /* durch Blockliste oder DNS-Filter gesperrt */
@@ -68,6 +72,13 @@ NetLive   *net_live_open(const char *url, const char *headers);
 int        net_live_read(NetLive *l, void *buf, int len);   /* blockiert; 0 = Ende, <0 Fehler/Abbruch */
 void       net_live_abort(NetLive *l);
 void       net_live_close(NetLive *l);
+
+/* wie net_request, mit eigenem Gesamt-Zeitlimit in Sekunden (0 = Standard) */
+int        net_request_to(const char *url, const char *post_body, const char *headers,
+                          NetBuf *out, long *status, char *final_url, int final_len, int timeout_s);
+
+/* UDP-Broadcast im Heimnetz; Antworten als "ip|nutzdaten". Rückgabe: Anzahl */
+int        net_udp_discover(int port, const char *msg, int timeout_ms, char out[][320], int max);
 
 /* Datei herunterladen (über "<path>.part", danach umbenennen). done/total in Bytes (total 0 = unbekannt) */
 int        net_download(const char *url, const char *headers, const char *path,

@@ -169,6 +169,7 @@ static struct {
     NetStream      *ns;
     int64_t         ns_pos;
     NetLive        *nl;               /* endloser HTTP-Stream (Internetradio) */
+    FILE           *lf;               /* lokale Datei (ux0:..., Downloads) */
     Hls            *hls;
     AVFormatContext *fmt;
     AVIOContext    *avio;
@@ -336,6 +337,11 @@ static int io_read(void *opaque, uint8_t *buf, int size)
         if (n < 0) return M.abort ? AVERROR_EXIT : AVERROR(EIO);
         return n;
     }
+    if (M.lf) {
+        size_t n = fread(buf, 1, (size_t)size, M.lf);
+        if (n == 0) return feof(M.lf) ? AVERROR_EOF : AVERROR(EIO);
+        return (int)n;
+    }
     if (M.nl) {
         int n = net_live_read(M.nl, buf, size);
         if (n == 0) return AVERROR_EOF;
@@ -353,6 +359,18 @@ static int io_read(void *opaque, uint8_t *buf, int size)
 static int64_t io_seek(void *opaque, int64_t off, int whence)
 {
     (void)opaque;
+    if (M.lf) {
+        if ((whence & ~AVSEEK_FORCE) == AVSEEK_SIZE) {
+            long cur = ftell(M.lf);
+            fseek(M.lf, 0, SEEK_END);
+            long sz = ftell(M.lf);
+            fseek(M.lf, cur, SEEK_SET);
+            return sz;
+        }
+        int w = whence & ~AVSEEK_FORCE;
+        if (fseek(M.lf, (long)off, w == SEEK_CUR ? SEEK_CUR : w == SEEK_END ? SEEK_END : SEEK_SET) != 0) return -1;
+        return ftell(M.lf);
+    }
     int64_t size = (int64_t)net_stream_size(M.ns);
     switch (whence & ~AVSEEK_FORCE) {
     case AVSEEK_SIZE: return size;
@@ -390,12 +408,12 @@ static int is_hls_url(const char *url)
 /* Öffnet FFmpeg auf der aktuellen Quelle (NetStream, Hls oder lokale Datei). */
 static int open_format(char *err, int errlen)
 {
-    int local = !M.ns && !M.hls && !M.nl;
+    int local = !M.ns && !M.hls && !M.nl && !M.lf;
     M.fmt = avformat_alloc_context();
     M.fmt->interrupt_callback.callback = io_interrupt;
     if (!local) {
         uint8_t *iobuf = av_malloc(IO_BUF_SIZE);
-        M.avio = avio_alloc_context(iobuf, IO_BUF_SIZE, 0, NULL, io_read, NULL, M.ns ? io_seek : NULL);
+        M.avio = avio_alloc_context(iobuf, IO_BUF_SIZE, 0, NULL, io_read, NULL, (M.ns || M.lf) ? io_seek : NULL);
         M.fmt->pb = M.avio;
         M.fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
         if (M.hls || M.nl) M.avio->seekable = 0;
@@ -933,9 +951,13 @@ static int setup_streams(char *err, int errlen)
 
 static int open_source(char *err, int errlen)
 {
-    char live_url[1024];
-    if (!strncmp(M.url, "ux0:", 4) || !strncmp(M.url, "uma0:", 5) || !strncmp(M.url, "file:", 5)) {
-        /* lokale Datei: FFmpeg liest direkt */
+    char live_url[VS_URL_MAX];
+    if (!strncmp(M.url, "ux0:", 4) || !strncmp(M.url, "uma0:", 5) || !strncmp(M.url, "ur0:", 4) ||
+        !strncmp(M.url, "file:", 5) || M.url[0] == '/') {
+        /* lokale Datei: über eigene Dateischnittstelle (FFmpeg hielte "ux0:" für ein Protokoll) */
+        const char *path = !strncmp(M.url, "file://", 7) ? M.url + 7 : !strncmp(M.url, "file:", 5) ? M.url + 5 : M.url;
+        M.lf = fopen(path, "rb");
+        if (!M.lf) { snprintf(err, errlen, "Datei nicht gefunden: %s", path); return -1; }
     } else if (is_hls_url(M.url)) {
         M.hls = hls_open(M.url, M.headers, &M.abort, err, errlen);
         if (!M.hls) return -1;
@@ -1252,6 +1274,7 @@ void media_close(void)
     hls_close(M.hls);
     net_stream_close(M.ns);
     net_live_close(M.nl);
+    if (M.lf) fclose(M.lf);
     free(M.url);
     free(M.headers);
     pthread_mutex_destroy(&M.fm);

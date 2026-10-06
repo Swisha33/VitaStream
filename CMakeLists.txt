@@ -13,7 +13,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "VitaStream")
 set(VITA_TITLEID  "VSTR00001")
-set(VITA_VERSION  "00.80")
+set(VITA_VERSION  "00.90")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall -Wno-unused-function")
@@ -46,6 +46,7 @@ add_executable(${PROJECT_NAME}
   src/history.c
   src/secure.c
   src/dl.c
+  src/epg.c
   third_party/aes/aes.c
 )
 

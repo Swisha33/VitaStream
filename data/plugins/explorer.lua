@@ -235,7 +235,8 @@ local function collect_players(html, base)
     seen[u] = true
     out[#out + 1] = { url = u, label = label, kind = kind }
   end
-  local text = html:gsub("\\/", "/")
+  -- JSON in Skripten (Next.js & Co.): \/ und \u002F als Schraegstrich lesen
+  local text = html:gsub("\\/", "/"):gsub("\\u002[Ff]", "/"):gsub("\\u0026", "&")
   -- direkte Medien
   for u in text:gmatch("(https?://[^\"'%s<>\\]+)") do
     if media_type(u) then add(u, nil, "media") end
@@ -370,8 +371,40 @@ local function match_score(a, ws, query)
   return s
 end
 
+-- Typische Such-Adressen, wenn die Seite kein erkennbares Suchformular hat
+local GUESS = { "/?s={q}", "/search?q={q}", "/suche?q={q}", "/search/{q}", "/?q={q}", "/search?query={q}",
+                "/search?keyword={q}", "/suche/{q}" }
+
+local function guess_search(site, query)
+  local origin = origin_of(site)
+  local q = vs.urlencode(query):gsub("%%", "%%%%")
+  local ws = words(query)
+  local own = host_of(site)
+  for _, g in ipairs(GUESS) do
+    local url = origin .. (g:gsub("{q}", q))
+    local html, final = fetch(url, site)
+    if html then
+      local hits = 0
+      for _, a in ipairs(anchors(html, final)) do
+        if host_of(a.url) == own and a.text ~= "" and match_score(a, ws, query) >= 3 then hits = hits + 1 end
+      end
+      if hits > 0 then
+        local found = { url = origin .. g, method = "get", how = "erkannt: " .. g:gsub("{q}", "...") }
+        local key = "explorer_search_" .. own:gsub("[^%w%.%-]", "_") .. ".txt"
+        vs.write_file(key, table.concat({ found.method, found.url, "", found.how }, "\t") .. "\n")
+        return found
+      end
+    end
+  end
+  return nil
+end
+
 local function site_search(site, query)
   local s = load_site_search(site)
+  if not s then
+    vs.log("Keine Suchfunktion erkannt - probiere typische Such-Adressen ...")
+    s = guess_search(site, query)
+  end
   local html, final
   if s then
     local q = vs.urlencode(query):gsub("%%", "%%%%")   -- als gsub-Ersatztext

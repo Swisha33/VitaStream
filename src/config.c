@@ -132,6 +132,7 @@ int config_load(void)
         else if (!strcmp(k, "theme"))         g_cfg.theme = atoi(v);
         else if (!strcmp(k, "custom_colors")) snprintf(g_cfg.custom_colors, sizeof g_cfg.custom_colors, "%s", v);
         else if (!strcmp(k, "menu_music"))    snprintf(g_cfg.menu_music, sizeof g_cfg.menu_music, "%s", v);
+        else if (!strcmp(k, "epg_url"))       snprintf(g_cfg.epg_url, sizeof g_cfg.epg_url, "%s", v);
         else if (!strcmp(k, "timeout"))       g_cfg.timeout_sec = atoi(v) > 0 ? atoi(v) : 20;
     }
     fclose(f);
@@ -163,10 +164,12 @@ int config_save(void)
         "custom_colors=%s\n"
         "# menu_music: Datei in ux0:data/VitaStream/music/ (leer = aus)\n"
         "menu_music=%s\n"
+        "# epg_url: Programmfuehrer (XMLTV-Adresse, auch .xml.gz) fuer Senderlisten ohne eigenen\n"
+        "epg_url=%s\n"
         "user_agent=%s\n",
         g_cfg.adblock_enabled, g_cfg.custom_dns_enabled,
         g_cfg.dns_primary, g_cfg.dns_secondary,
-        g_cfg.timeout_sec, g_cfg.ssl_verify, g_cfg.proxy, g_cfg.audio_lang, g_cfg.theme, g_cfg.custom_colors, g_cfg.menu_music, g_cfg.user_agent);
+        g_cfg.timeout_sec, g_cfg.ssl_verify, g_cfg.proxy, g_cfg.audio_lang, g_cfg.theme, g_cfg.custom_colors, g_cfg.menu_music, g_cfg.epg_url, g_cfg.user_agent);
     fclose(f);
     return 0;
 }

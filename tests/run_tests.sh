@@ -18,6 +18,9 @@ gcc -Wall $SAN -o test_history test_history.c ../src/history.c
 gcc -Wall $SAN -o test_secure test_secure.c ../src/secure.c ../third_party/aes/aes.c
 ./test_secure
 
+gcc -Wall $SAN -o test_epg test_epg.c ../src/epg.c -lz -lpthread
+./test_epg
+
 gcc -Wall $SAN -o test_watched test_watched.c ../src/watched.c
 ./test_watched
 
@@ -27,8 +30,8 @@ gcc -Wall $SAN -DDNS_PORT=5353 -o test_dns test_dns.c ../src/dns.c
 ./test_dns || { kill $DNSPID; exit 1; }
 kill $DNSPID
 
-gcc -Wall $SAN -I"$LUA_SRC" -o test_plugins test_plugins.c ../src/plugins.c ../src/adblock.c ../src/secure.c ../third_party/aes/aes.c \
-    "$LUA_SRC/liblua.a" -lm -ldl -lpthread
+gcc -Wall $SAN -I"$LUA_SRC" -o test_plugins test_plugins.c ../src/plugins.c ../src/adblock.c ../src/secure.c ../src/epg.c ../third_party/aes/aes.c \
+    "$LUA_SRC/liblua.a" -lz -lm -ldl -lpthread
 rm -rf run && D="run/ux0:data/VitaStream" && mkdir -p "$D/plugins"
 cp ../data/*.txt ../data/*.ini "$D/" && cp ../data/plugins/*.lua "$D/plugins/"
 # Beispielseite aktivieren, Testplaylist + Testsperre ergänzen

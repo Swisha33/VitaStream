@@ -21,3 +21,7 @@ tests/test_dl
 tests/dlrun/
 tests/test_secure
 tests/sec_run/
+tests/lf_run/
+tests/test_epg
+tests/epg_plain.xml
+tests/epg.xml.gz

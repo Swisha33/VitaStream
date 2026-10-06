@@ -9,7 +9,7 @@ local json = require("json")
 
 local RADIO_SERVERS = { "https://de1.api.radio-browser.info", "https://fi1.api.radio-browser.info",
                         "https://at1.api.radio-browser.info" }
-local UA = "User-Agent: VitaStream/0.8 (PS Vita homebrew)"
+local UA = "User-Agent: VitaStream/0.9 (PS Vita homebrew)"
 local PLAYABLE = { MP3 = true, AAC = true, ["AAC+"] = true, MPEG = true, HLS = true }
 local RADIO_PAGE = 60
 
@@ -183,6 +183,105 @@ end
 
 local function folder(title, id, sub) return { title = title, id = id, kind = "folder", subtitle = sub } end
 
+-- ---------------------------------------------------------------- Freie Musik (Menuemusik)
+-- Netlabel-Sammlung des Internet Archive: Alben unter Creative-Commons-Lizenz bzw. gemeinfrei.
+local FM_BASE = '(licenseurl:*creativecommons* OR licenseurl:*publicdomain*) AND mediatype:(audio)'
+local FM_CATS = {
+  { "Chiptune & 8-Bit", 'collection:(netlabels) AND subject:(chiptune OR 8bit OR "8-bit")' },
+  { "Lounge & Chill", 'collection:(netlabels) AND subject:(chillout OR lounge OR downtempo)' },
+  { "Ambient", 'collection:(netlabels) AND subject:(ambient)' },
+  { "Elektronisch", 'collection:(netlabels) AND subject:(electronic OR electronica)' },
+  { "Jazz", 'collection:(netlabels) AND subject:(jazz)' },
+  { "Klassik (gemeinfrei)", '(collection:(musopen) OR (collection:(netlabels) AND subject:(classical)))' },
+  { "Videospiel-Stil", 'collection:(netlabels) AND subject:(videogame OR "video game" OR "game music")' },
+}
+local FM_PAGE = 40
+
+local function license_short(u)
+  u = tostring(u or ""):lower()
+  if u:find("publicdomain") or u:find("/zero/") then return "gemeinfrei" end
+  local kind = u:match("licenses/([%w%-]+)/")
+  return kind and ("CC " .. kind:upper()) or "CC"
+end
+
+local function fm_albums(ci, page)
+  local c = FM_CATS[ci]
+  if not c then return nil, "Unbekannt" end
+  local q = FM_BASE .. " AND " .. c[2]
+  local url = "https://archive.org/advancedsearch.php?q=" .. vs.urlencode(q) ..
+              "&fl%5B%5D=identifier&fl%5B%5D=title&fl%5B%5D=creator&fl%5B%5D=licenseurl" ..
+              "&sort%5B%5D=downloads%20desc&rows=" .. FM_PAGE .. "&page=" .. (page + 1) .. "&output=json"
+  local body, status = vs.http_get(url, UA)
+  if not body then return nil, "Internet Archive nicht erreichbar: " .. tostring(status) end
+  local ok, data = pcall(json.decode, body)
+  local docs = ok and type(data) == "table" and data.response and data.response.docs
+  if type(docs) ~= "table" then return nil, "Antwort unlesbar" end
+  local items = {}
+  for _, d in ipairs(docs) do
+    local creator = type(d.creator) == "table" and d.creator[1] or d.creator
+    items[#items + 1] = { title = tostring(type(d.title) == "table" and d.title[1] or d.title or d.identifier),
+                          subtitle = (creator and (tostring(creator) .. "  |  ") or "") .. license_short(d.licenseurl),
+                          id = "fma:" .. d.identifier, kind = "folder",
+                          thumb = "https://archive.org/services/img/" .. d.identifier }
+  end
+  if #docs == FM_PAGE then items[#items + 1] = { title = "Weitere Alben", kind = "more", id = "fmc:" .. ci .. ":" .. (page + 1) } end
+  if #items == 0 then return nil, "Keine Alben gefunden" end
+  return items
+end
+
+local function safe_name(s)
+  s = tostring(s):gsub("[^%w%-%._ ]", ""):gsub("%s+", " ")
+  s = trim(s)
+  return (#s > 0) and s:sub(1, 80) or "Titel"
+end
+
+local function fm_tracks(identifier)
+  local body, status = vs.http_get("https://archive.org/metadata/" .. identifier, UA)
+  local ok, meta = pcall(json.decode, body or "")
+  if not ok or type(meta) ~= "table" or type(meta.files) ~= "table" then
+    return nil, "Album nicht lesbar (" .. tostring(status) .. ")"
+  end
+  local md = meta.metadata or {}
+  local artist = type(md.creator) == "table" and md.creator[1] or md.creator or "?"
+  local lic = license_short(md.licenseurl)
+  -- je Titel eine MP3 (VBR bevorzugt, sonst die kleinste)
+  local groups, order = {}, {}
+  for _, f in ipairs(meta.files) do
+    local name = f.name or ""
+    if name:lower():match("%.mp3$") then
+      local key = ((f.source == "derivative" and f.original) or name):gsub("%.[%w]+$", "")
+      local g = groups[key]
+      if not g then g = {}; groups[key] = g; order[#order + 1] = key end
+      local vbr = tostring(f.format or ""):find("VBR") ~= nil
+      if not g.name or (vbr and not g.vbr) then
+        g.name, g.vbr, g.title, g.track, g.len = name, vbr, f.title, tonumber(f.track and tostring(f.track):match("%d+")), f.length
+      end
+    end
+  end
+  local list = {}
+  for _, k in ipairs(order) do list[#list + 1] = groups[k] end
+  table.sort(list, function(a, b)
+    if a.track and b.track and a.track ~= b.track then return a.track < b.track end
+    return a.name:lower() < b.name:lower()
+  end)
+  local items = {}
+  for _, g in ipairs(list) do
+    local title = (type(g.title) == "string" and g.title ~= "") and g.title or g.name:gsub("%.mp3$", ""):gsub("[_]+", " ")
+    local url = "https://archive.org/download/" .. identifier .. "/" .. (vs.urlencode(g.name):gsub("%%2F", "/"))
+    local len = tonumber(g.len)
+    items[#items + 1] = {
+      title = title, kind = "video", id = url, url = url,
+      subtitle = tostring(artist) .. "  |  " .. lic .. (len and string.format("  |  %d:%02d", len // 60, math.floor(len % 60)) or "") ..
+                 "  |  Quadrat: als Menuemusik",
+      thumb = "https://archive.org/services/img/" .. identifier,
+      music = safe_name(tostring(artist) .. " - " .. title) .. ".mp3",
+      music_title = title .. " (" .. tostring(artist) .. ", " .. lic .. ")",
+    }
+  end
+  if #items == 0 then return nil, "Keine MP3-Titel in diesem Album" end
+  return items
+end
+
 return {
   name = "Audiothek (Radio & Podcasts)",
   description = "Internetradio weltweit und Podcasts - getrennt von der Video-Mediathek",
@@ -197,6 +296,7 @@ return {
         folder("Radio nach Land", "rcountries"),
         folder("Podcast-Charts", "podcharts", "Top 50 in Deutschland"),
         folder("Podcasts von ARD, ZDF, DLF ...", "podpublic", "oeffentlich-rechtliche Anbieter"),
+        folder("Freie Musik fuer die Menuemusik", "fm", "Creative Commons / gemeinfrei - Titel mit Quadrat uebernehmen"),
       }
     end
     if id == "rgenres" then
@@ -215,6 +315,16 @@ return {
     if tag then return radio_search("&tag=" .. tag .. "&tagExact=false", tonumber(toff), "rt:" .. tag .. ":") end
     local nq, noff = id:match("^rn:(.-):(%d+)$")
     if nq then return radio_search("&name=" .. nq, tonumber(noff), "rn:" .. nq .. ":") end
+
+    if id == "fm" then
+      local items = {}
+      for i, c in ipairs(FM_CATS) do items[#items + 1] = folder(c[1], "fmc:" .. i .. ":0") end
+      return items
+    end
+    local fci, fpage = id:match("^fmc:(%d+):(%d+)$")
+    if fci then return fm_albums(tonumber(fci), tonumber(fpage)) end
+    local fma = id:match("^fma:(.+)$")
+    if fma then return fm_tracks(fma) end
 
     if id == "podcharts" then return podcast_charts() end
     if id == "podpublic" then
@@ -238,5 +348,18 @@ return {
 
   resolve = function(item)
     return item.url or item.id
+  end,
+
+  actions = function(item)
+    if item.music then return { { id = "bgm", label = "Als Menuemusik verwenden" } } end
+    return {}
+  end,
+
+  action = function(item, id)
+    if id == "bgm" and item.music then
+      vs.menu_music(item.url or item.id, item.music, item.music_title or item.title)
+      return { message = "Wird heruntergeladen und als Menuemusik eingestellt (Fortschritt unten in der Statuszeile)." }
+    end
+    return nil, "Unbekannte Aktion"
   end,
 }

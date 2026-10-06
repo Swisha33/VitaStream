@@ -2,6 +2,7 @@
 #include "secure.h"
 #include "net.h"
 #include "config.h"
+#include "epg.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,11 +32,12 @@ static int l_http(lua_State *ls, int is_post)
     const char *url = luaL_checkstring(ls, 1);
     const char *body = is_post ? luaL_checkstring(ls, 2) : NULL;
     const char *hdr = luaL_optstring(ls, is_post ? 3 : 2, NULL);
+    int timeout = (int)luaL_optinteger(ls, is_post ? 4 : 3, 0);   /* Sekunden, 0 = Standard */
 
     NetBuf b;
     long status = 0;
-    char final_url[1024];
-    int r = net_request(url, body, hdr, &b, &status, final_url, sizeof final_url);
+    char final_url[VS_URL_MAX];
+    int r = net_request_to(url, body, hdr, &b, &status, final_url, sizeof final_url, timeout);
     if (r != NET_OK) {
         lua_pushnil(ls);
         const char *d = net_last_detail();
@@ -69,6 +71,97 @@ static int l_secret_set(lua_State *ls)
     const char *name = luaL_checkstring(ls, 1);
     const char *val = lua_isnoneornil(ls, 2) ? NULL : luaL_checkstring(ls, 2);
     lua_pushboolean(ls, secure_put(name, val) == 0);
+    return 1;
+}
+
+/* vs.menu_music(url, dateiname, titel): Titel als Menümusik laden (die App lädt und stellt ein) */
+static char s_music_url[2048], s_music_name[160], s_music_title[160];
+static int s_music_req;
+static int l_menu_music(lua_State *ls)
+{
+    snprintf(s_music_url, sizeof s_music_url, "%s", luaL_checkstring(ls, 1));
+    snprintf(s_music_name, sizeof s_music_name, "%s", luaL_checkstring(ls, 2));
+    snprintf(s_music_title, sizeof s_music_title, "%s", luaL_optstring(ls, 3, s_music_name));
+    s_music_req = 1;
+    return 0;
+}
+
+int plugins_take_music_request(char *url, int ul, char *name, int nl, char *title, int tl)
+{
+    if (!s_music_req) return 0;
+    s_music_req = 0;
+    snprintf(url, ul, "%s", s_music_url);
+    snprintf(name, nl, "%s", s_music_name);
+    snprintf(title, tl, "%s", s_music_title);
+    return 1;
+}
+
+/* ---- Programmführer: vs.epg_load(url), vs.epg_now(tvg_id, name), vs.epg_status(), vs.time() ---- */
+static int l_epg_load(lua_State *ls)
+{
+    const char *u = luaL_optstring(ls, 1, "");
+    if (!*u) epg_load(NULL);                    /* Adresse aus den Einstellungen */
+    else if (!strncmp(u, "http://", 7) || !strncmp(u, "https://", 8)) epg_load(u);
+    return 0;
+}
+
+static void push_show(lua_State *ls, const EpgShow *s)
+{
+    char a[16], b[16];
+    lua_newtable(ls);
+    lua_pushstring(ls, s->title);        lua_setfield(ls, -2, "title");
+    lua_pushinteger(ls, (lua_Integer)s->start); lua_setfield(ls, -2, "start");
+    lua_pushinteger(ls, (lua_Integer)s->stop);  lua_setfield(ls, -2, "stop");
+    epg_fmt_hm(s->start, a, sizeof a);
+    epg_fmt_hm(s->stop, b, sizeof b);
+    lua_pushstring(ls, a); lua_setfield(ls, -2, "from");
+    lua_pushstring(ls, b); lua_setfield(ls, -2, "to");
+}
+
+/* -> { now = {title, start, stop, from, to} | nil, next = {...} | nil } oder nil */
+static int l_epg_now(lua_State *ls)
+{
+    const char *id = luaL_optstring(ls, 1, NULL);
+    const char *name = luaL_optstring(ls, 2, NULL);
+    EpgShow s[2];
+    int64_t now = epg_time_now();
+    int n = epg_now(id, name, now, s);
+    if (n <= 0) { lua_pushnil(ls); return 1; }
+    lua_newtable(ls);
+    if (s[0].title[0]) {
+        push_show(ls, &s[0]);
+        int64_t len = s[0].stop - s[0].start;
+        lua_pushinteger(ls, len > 0 ? (lua_Integer)((now - s[0].start) * 100 / len) : 0);
+        lua_setfield(ls, -2, "percent");
+        lua_setfield(ls, -2, "now");
+    }
+    if (n > 1) { push_show(ls, &s[1]); lua_setfield(ls, -2, "next"); }
+    return 1;
+}
+
+static int l_epg_status(lua_State *ls) { lua_pushstring(ls, epg_status()); return 1; }
+static int l_time(lua_State *ls) { lua_pushinteger(ls, (lua_Integer)epg_time_now()); return 1; }
+
+/* vs.discover(port, nachricht [, ms]) -> { {ip=..., data=...}, ... }: UDP-Broadcast im Heimnetz */
+static int l_discover(lua_State *ls)
+{
+    int port = (int)luaL_checkinteger(ls, 1);
+    const char *msg = luaL_checkstring(ls, 2);
+    int ms = (int)luaL_optinteger(ls, 3, 1500);
+    if (port <= 0 || port > 65535 || ms < 100 || ms > 5000) return luaL_error(ls, "ungueltige Parameter");
+    static char res[8][320];
+    int n = net_udp_discover(port, msg, ms, res, 8);
+    lua_newtable(ls);
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        char *bar = strchr(res[i], '|');
+        if (!bar) continue;
+        *bar = 0;
+        lua_newtable(ls);
+        lua_pushstring(ls, res[i]); lua_setfield(ls, -2, "ip");
+        lua_pushstring(ls, bar + 1); lua_setfield(ls, -2, "data");
+        lua_rawseti(ls, -2, ++k);
+    }
     return 1;
 }
 
@@ -273,6 +366,12 @@ static const luaL_Reg vs_funcs[] = {
     {"write_file",    l_write_file},
     {"delete_file",   l_delete_file},
     {"secret_get",    l_secret_get},
+    {"discover",      l_discover},
+    {"menu_music",    l_menu_music},
+    {"epg_load",      l_epg_load},
+    {"epg_now",       l_epg_now},
+    {"epg_status",    l_epg_status},
+    {"time",          l_time},
     {"list_downloads", l_list_downloads},
     {"delete_download", l_delete_download},
     {"secret_set",    l_secret_set},
@@ -414,7 +513,7 @@ static int load_all(void)
 
 /* ======================= Worker ======================= */
 
-typedef enum { OP_SEARCH, OP_BROWSE, OP_RESOLVE, OP_ACTION } Op;
+typedef enum { OP_SEARCH, OP_BROWSE, OP_RESOLVE, OP_ACTION, OP_DOWNLOAD } Op;
 
 static struct {
     pthread_t       thread;
@@ -487,10 +586,15 @@ static void run_job(void)
     pthread_mutex_lock(&s_lua_lock);
     int top = lua_gettop(L);
     const char *fname = W.op == OP_SEARCH ? "search" : W.op == OP_BROWSE ? "browse" :
-                         W.op == OP_ACTION ? "action" : "resolve";
+                         W.op == OP_ACTION ? "action" : W.op == OP_DOWNLOAD ? "download" : "resolve";
 
     lua_rawgeti(L, LUA_REGISTRYINDEX, s_sources[W.src].ref);
     lua_getfield(L, -1, fname);
+    if (W.op == OP_DOWNLOAD) {
+        /* eigener Download-Weg des Plugins (z. B. umgewandelte MP4), sonst wie Abspielen */
+        if (!lua_isfunction(L, -1)) { lua_pop(L, 1); lua_getfield(L, -1, "resolve"); }
+        W.op = OP_RESOLVE;
+    }
     if (!lua_isfunction(L, -1)) {
         set_error("Funktion vom Plugin nicht unterstuetzt");
         W.state = JOB_ERROR;
@@ -667,6 +771,28 @@ int plugins_item_actions(int src, const PluginItem *it, PluginAction *out, int m
     return n;
 }
 
+/* Zusatzinfo eines Eintrags (z. B. laufende Sendung): info(item) -> Text. Synchron, nur ohne laufenden Job */
+int plugins_item_info(int src, const PluginItem *it, char *out, int n)
+{
+    out[0] = 0;
+    if (!it || W.state == JOB_RUNNING || src < 0 || src >= s_nsources || !L) return 0;
+    if (pthread_mutex_trylock(&s_lua_lock) != 0) return 0;
+    int top = lua_gettop(L);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, s_sources[src].ref);
+    lua_getfield(L, -1, "info");
+    if (lua_isfunction(L, -1)) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, it->ref);
+        if (lua_pcall(L, 1, 1, 0) == LUA_OK) {
+            if (lua_isstring(L, -1)) snprintf(out, n, "%s", lua_tostring(L, -1));
+        } else {
+            snprintf(s_log, sizeof s_log, "info: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
+        }
+    }
+    lua_settop(L, top);
+    pthread_mutex_unlock(&s_lua_lock);
+    return out[0] != 0;
+}
+
 int plugins_start_search(int src, const char *q)  { return start(OP_SEARCH, src, q, LUA_NOREF); }
 int plugins_start_search_ctx(int src, const char *q, const char *ctx)
 {
@@ -674,6 +800,7 @@ int plugins_start_search_ctx(int src, const char *q, const char *ctx)
 }
 int plugins_start_browse(int src, const char *id) { return start(OP_BROWSE, src, id, LUA_NOREF); }
 int plugins_start_resolve(int src, const PluginItem *it) { return start(OP_RESOLVE, src, NULL, it->ref); }
+int plugins_start_download(int src, const PluginItem *it) { return start(OP_DOWNLOAD, src, NULL, it->ref); }
 
 static int s_tmp_ref = LUA_NOREF;
 

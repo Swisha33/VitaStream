@@ -9,6 +9,7 @@
 int net_request(const char *u, const char *p, const char *h, NetBuf *o, long *s, char *f, int fl)
 { (void)u; (void)p; (void)h; (void)o; (void)s; (void)f; (void)fl; return NET_ERR; }
 void net_buf_free(NetBuf *b) { free(b->data); b->data = NULL; }
+const char *net_strerror(int c) { (void)c; return "Netzwerkfehler"; }
 void hls_join_url(const char *base, const char *ref, char *out, int n) { (void)base; snprintf(out, n, "%s", ref); }
 
 static int fails;
@@ -57,6 +58,18 @@ int main(void)
     CHECK(sub_parse_into(ttml, 0, &c, &n, &cap) == 2);
     CHECK(at(c, n, 4000) && !strcmp(at(c, n, 4000), "Erste\nZeile"));
     CHECK(at(c, n, 6500) && !strcmp(at(c, n, 6500), "Dur-Angabe"));
+    sub_free_cues(c, n); c = NULL; n = cap = 0;
+
+    /* EBU-TT der ARD: Namensraum-Praefix tt:, verschachtelte Spans, tt:br */
+    const char *ebu =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<tt:tt xmlns:tt=\"http://www.w3.org/ns/ttml\" ttp:timeBase=\"media\">"
+        "<tt:body><tt:div>\n"
+        "<tt:p xml:id=\"sub0\" region=\"bottom\" begin=\"00:00:02.000\" end=\"00:00:04.500\">\n"
+        "  <tt:span style=\"textWhite\">Guten Abend,</tt:span><tt:br/>\n  <tt:span style=\"textYellow\">meine Damen &amp; Herren.</tt:span>\n"
+        "</tt:p>\n<tt:p begin=\"00:00:05.000\" end=\"00:00:06.000\"><tt:span>Zweiter</tt:span></tt:p></tt:div></tt:body></tt:tt>";
+    CHECK(sub_parse_into(ebu, 0, &c, &n, &cap) == 2);
+    CHECK(at(c, n, 3000) && !strcmp(at(c, n, 3000), "Guten Abend,\nmeine Damen & Herren."));
+    CHECK(at(c, n, 5500) && !strcmp(at(c, n, 5500), "Zweiter"));
     sub_free_cues(c, n); c = NULL; n = cap = 0;
 
     /* TTML mit Ticks (ARD) */

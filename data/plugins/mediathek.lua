@@ -265,7 +265,7 @@ local function ia_list(query_expr, lang_expr, page)
       local title = type(d.title) == "table" and d.title[1] or d.title or d.identifier
       items[#items + 1] = {
         title = tostring(title), subtitle = d.year and ("Jahr " .. tostring(d.year)) or "Internet Archive",
-        id = "iaplay:" .. d.identifier, kind = "video",
+        id = "iaitem:" .. d.identifier, kind = "folder",
         thumb = "https://archive.org/services/img/" .. d.identifier,
       }
     end
@@ -286,23 +286,87 @@ local function ia_page(query_expr, lang_expr, page, more_prefix)
   return items
 end
 
--- Internet-Archive-Eintrag aufloesen: kleinste MP4-Ableitung waehlen (Vita-geeignet)
-local function ia_resolve(identifier)
-  local body = vs.http_get("https://archive.org/metadata/" .. identifier)
+-- natuerliche Sortierung: "Folge 2" vor "Folge 10"
+local function natural_less(a, b)
+  local function key(s)
+    return (s:lower():gsub("%d+", function(d) return string.format("%012d", tonumber(d)) end))
+  end
+  return key(a) < key(b)
+end
+
+local function ia_len(v)
+  if not v then return nil end
+  local h, m, sec = tostring(v):match("^(%d+):(%d+):(%d+)")
+  local total = h and (tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(sec)) or tonumber(v)
+  if not total or total <= 0 then return nil end
+  total = math.floor(total)
+  if total >= 3600 then return string.format("%d:%02d:%02d", total // 3600, (total // 60) % 60, total % 60) end
+  return string.format("%d:%02d", total // 60, total % 60)
+end
+
+-- Alle abspielbaren Videos eines Archiv-Eintrags: je Original (Folge) die kleinste MP4-Fassung
+local function ia_files(identifier)
+  local body, status = vs.http_get("https://archive.org/metadata/" .. identifier)
   local ok, meta = pcall(json.decode, body or "")
   if not ok or type(meta) ~= "table" or type(meta.files) ~= "table" then
-    return nil, "Internet Archive: keine Metadaten"
+    return nil, "Internet Archive: keine Metadaten (" .. tostring(status) .. ")"
   end
-  local best, best_size
+  local groups, order = {}, {}
   for _, f in ipairs(meta.files) do
-    local name = (f.name or ""):lower()
-    if name:match("%.mp4$") or name:match("%.m4v$") then
+    local name = f.name or ""
+    local low = name:lower()
+    if (low:match("%.mp4$") or low:match("%.m4v$")) and not low:find("sample", 1, true) then
+      local key = (f.source == "derivative" and f.original) or name
+      key = key:gsub("%.[%w]+$", "")
       local size = tonumber(f.size) or 0
-      if not best or (size > 0 and size < best_size) then best, best_size = f.name, size end
+      local g = groups[key]
+      if not g then g = {}; groups[key] = g; order[#order + 1] = key end
+      if not g.name or (size > 0 and (g.size == 0 or size < g.size)) then
+        g.name, g.size = name, size
+        g.title = (type(f.title) == "string" and f.title ~= "") and f.title or nil
+        g.len = f.length
+      end
     end
   end
-  if not best then return nil, "Internet Archive: keine abspielbare MP4-Datei (evtl. nur andere Formate)" end
-  return "https://archive.org/download/" .. identifier .. "/" .. (vs.urlencode(best):gsub("%%2F", "/"))
+  local list = {}
+  for _, k in ipairs(order) do groups[k].key = k; list[#list + 1] = groups[k] end
+  table.sort(list, function(a, b) return natural_less(a.key, b.key) end)
+  return list, meta
+end
+
+local function ia_url(identifier, name)
+  return "https://archive.org/download/" .. identifier .. "/" .. (vs.urlencode(name):gsub("%%2F", "/"))
+end
+
+-- Eintrag oeffnen: ein Film -> ein Video, eine Serie -> alle Folgen
+local function ia_item(identifier)
+  local list, meta = ia_files(identifier)
+  if not list then return nil, meta end
+  if #list == 0 then return nil, "Keine abspielbare MP4-Datei in diesem Eintrag (nur andere Formate)" end
+  local thumb = "https://archive.org/services/img/" .. identifier
+  local main_title = meta.metadata and meta.metadata.title
+  if type(main_title) == "table" then main_title = main_title[1] end
+  local items = {}
+  for i, g in ipairs(list) do
+    local label = g.title or g.key:gsub("^.*/", ""):gsub("[_%.]+", " ")
+    if #list == 1 and main_title then label = tostring(main_title) end
+    local sub = {}
+    if #list > 1 then sub[#sub + 1] = "Teil " .. i .. " von " .. #list end
+    local l = ia_len(g.len)
+    if l then sub[#sub + 1] = l end
+    if g.size > 0 then sub[#sub + 1] = string.format("%.0f MB", g.size / 1048576) end
+    items[#items + 1] = { title = label, subtitle = table.concat(sub, "  |  "), kind = "video",
+                          id = "iafile:" .. identifier .. "/" .. g.name, thumb = thumb }
+  end
+  return items
+end
+
+-- Kompatibilitaet (gespeicherte Eintraege aus 0.7/0.8): erstes Video eines Eintrags
+local function ia_resolve(identifier)
+  local list, err = ia_files(identifier)
+  if not list then return nil, err end
+  if #list == 0 then return nil, "Internet Archive: keine abspielbare MP4-Datei" end
+  return ia_url(identifier, list[1].name)
 end
 
 local function ia_search(lang, text, page)
@@ -370,6 +434,8 @@ return {
       if not (L and C) then return nil, "Unbekannt" end
       return ia_page(C[2], L[2], tonumber(iaoff), "ia:" .. ialang .. ":" .. iaci .. ":")
     end
+    local iaid = id:match("^iaitem:(.+)$")
+    if iaid then return ia_item(iaid) end
     local ialq, iaquery, iaqoff = id:match("^iaq:(%a%a):(.-):(%d+)$")
     if ialq then return ia_search(ialq, dec(iaquery), tonumber(iaqoff)) end
 
@@ -450,6 +516,8 @@ return {
   end,
 
   resolve = function(item)
+    local fid, fname = item.id:match("^iafile:([^/]+)/(.+)$")
+    if fid then return ia_url(fid, fname) end
     local ident = item.id:match("^iaplay:(.+)$")
     if ident then return ia_resolve(ident) end
     if item.subs then

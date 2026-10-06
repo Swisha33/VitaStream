@@ -9,13 +9,13 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
 
 - **Quellen-Plugins in Lua** – Suchen, Durchblättern, Abspielen, mit Vorschaubildern und „Weitere laden“.
 - **Mitgelieferte Quellen**
-  - *Mediatheken nach Sprache* – Deutsch: ARD, ZDF, arte, 3sat, KiKA … pro Sender Neueste, Sendungen, Kategorien; English, Hrvatski, Français, Español u. a.: freie Filme & Shows aus dem Internet Archive (Kategorien + Suche)
+  - *Mediatheken nach Sprache* – Deutsch: ARD, ZDF, arte, 3sat, KiKA … pro Sender Neueste, Sendungen, Kategorien; English, Hrvatski, Français, Español u. a.: freie Filme & Shows aus dem Internet Archive (Kategorien + Suche, Einträge mit mehreren Folgen werden als Folgenliste geöffnet)
   - *YouTube* – offizielle Kanäle (Pokémon, LEGO, Shaun das Schaf, Cartoon Network, KiKA …), Anime-Kanäle (TMS, Crunchyroll, Muse Asia …), Suche, Playlisten mit Folgen in Reihenfolge; bis 720p
   - *Pluto TV auf Abruf* – kostenlose Filme & Serien nach Genre, Staffeln und Folgen
-  - *Audiothek* – Internetradio weltweit (nach Land, Genre, Suche) und Podcasts (Suche, Charts, ARD/ZDF/DLF …), getrennt von der Video-Mediathek
-  - *Sender-Finder* – tausende frei empfangbare Sender (iptv-org) nach Kategorie, Land, Sprache; Pluto TV, Samsung TV Plus, Rakuten TV; Anime & Zeichentrick
+  - *Audiothek* – Internetradio weltweit (nach Land, Genre, Suche) und Podcasts (Suche, Charts, ARD/ZDF/DLF …), getrennt von der Video-Mediathek; *Freie Musik für die Menümusik* (Creative-Commons/gemeinfrei aus dem Internet Archive, per □ direkt als Menümusik laden)
+  - *Sender-Finder* – tausende frei empfangbare Sender (iptv-org) nach Kategorie, Land, Sprache; Pluto TV, Samsung TV Plus, Rakuten TV, LG Channels, Roku; Anime & Zeichentrick; Programmführer für Pluto TV, Samsung TV Plus und Roku
   - *South Park* – alle Staffeln von southpark.de (Deutsch/Englisch)
-  - *Jellyfin* – eigener Server: Anmeldung in drei Schritten (Adresse, Benutzer, Passwort), Passwort wird nie gespeichert, Zugriffs-Token nur gerätegebunden verschlüsselt; Mediathek wie auf dem Server; der Server entscheidet per Geräteprofil zwischen Direktwiedergabe und Umwandlung (MKV, HEVC, 10-Bit, DTS laufen dadurch auch), Untertitel des Servers
+  - *Jellyfin* – eigener Server: Server im Heimnetz automatisch finden oder Adresse eingeben (Port 8096 wird ergänzt), Anmeldung mit Benutzer und Passwort, Passwort wird nie gespeichert, Zugriffs-Token nur gerätegebunden verschlüsselt; Mediathek wie auf dem Server; der Server entscheidet per Geräteprofil zwischen Direktwiedergabe und Umwandlung (MKV, HEVC, 10-Bit, DTS laufen dadurch auch), Untertitel des Servers
   - *Adult Swim* – kostenlos freigeschaltete Folgen von adultswim.com (USA-Angebot, teils kopiergeschützt)
   - *Downloads* – heruntergeladene Videos und Podcasts offline abspielen
   - *M3U-Playlists & Favoriten* – eigene Listen, Logos, Gruppen
@@ -24,9 +24,10 @@ eigenen Websites und Playlists sowie abschaltbarem AdBlock (lokale Blockliste + 
   - *Eigene Websites* – per Muster in `sites.txt`
 - **Favoriten & Playlists** – mit Quadrat einzelne Einträge oder ganze Listen speichern; eigene Playlists bearbeiten (löschen, umbenennen, verschieben), defekte Streams automatisch entfernen, Online-Listen als bearbeitbare Kopie übernehmen
 - **Player** – MP4, HLS (inkl. AES-128 und separater Tonspuren), MPEG-TS; Hardware-H.264 bis 720p, Software-Ersatz für SD/Interlaced; AAC/MP3/AC3; Werbeunterbrechungen (Zeitsprünge) werden überbrückt
+- **Programmführer (EPG)** – „Jetzt / Danach“ für Live-Sender in der Liste, im Player und beim Senderwechsel; aus dem Kopf der M3U-Liste (`url-tvg`/`x-tvg-url`) oder einer eigenen XMLTV-Adresse (Einstellungen, auch `.xml.gz`)
 - **Zuletzt gesehen** – ganz oben auf der Startseite, mit der Stelle, an der du aufgehört hast
 - **Weiterschauen** – angefangene Videos sind markiert (Balken auf dem Vorschaubild); beim Start Abfrage „Weiterschauen“ oder „Von Anfang an“
-- **Herunterladen** – □-Menü → „Herunterladen“ für direkte Dateien (Mediatheken, Podcasts, Internet Archive, eigene Jellyfin-Dateien); nicht für Streams und YouTube
+- **Herunterladen** – □-Menü → „Herunterladen“ für direkte Dateien (Mediatheken, Podcasts, Internet Archive); Jellyfin-Videos, die die Vita nicht direkt kann, wandelt der Server beim Herunterladen in MP4 um; nicht für YouTube
 - **Hintergrundwiedergabe** – Musik, Radio, Podcasts laufen beim Stöbern in der App weiter (Zurück im Player; SELECT: zurück zum Player, START: Stopp)
 - **Ton & Untertitel** – im Player mit △: Tonspur wählen (HLS-Sprachspuren oder mehrere Spuren in MP4/TS, Sprache wird gemerkt), Untertitel ein/aus (WebVTT aus HLS, TTML/WebVTT/SRT der Mediatheken)
 - **Internetradio** – endlose Streams (Icecast/Shoutcast) laufen direkt, auch in eigenen M3U-Listen
@@ -119,16 +120,22 @@ Weitere Möglichkeiten:
   `{ id = "del", label = "Löschen", confirm = true }` oder `{ id = "ren", label = "Umbenennen", input = "Neuer Name" }`;
   `action` gibt `{ message = "...", refresh = true }` zurück
 - `vs.probe(url [, headers])` – prüft, ob ein Stream antwortet
+- `download(item)` – optional, wie `resolve`, aber für „Herunterladen“ (z. B. eine umgewandelte Datei)
+- `info(item)` – optional, kurzer Text zum gewählten Eintrag (z. B. laufende Sendung); wird in der Liste und im Player angezeigt
 
 **Lua-API (`vs.*`)**
 
 | Funktion | Beschreibung |
 |---|---|
-| `vs.http_get(url [, headers])` | → `body, status, final_url` oder `nil, fehler` |
+| `vs.http_get(url [, headers [, timeout]])` | → `body, status, final_url` oder `nil, fehler` |
 | `vs.http_post(url, body [, headers])` | wie oben; `headers` als Text, Zeilen mit `\n` getrennt |
 | `vs.is_blocked(url)` | `true`, wenn AdBlock/DNS den Host sperrt |
 | `vs.urlencode(s)`, `vs.html_unescape(s)` | Hilfsfunktionen |
 | `vs.read_file(name)`, `vs.write_file(name, text [, append])` | nur innerhalb von `ux0:data/VitaStream` |
+| `vs.epg_load([url])`, `vs.epg_now(tvg_id, name)` | Programmführer laden (ohne Adresse: die aus den Einstellungen) / laufende und nächste Sendung: `{ now = {title, from, to, percent}, next = {...} }` |
+| `vs.discover(port, nachricht [, ms])` | UDP-Suche im Heimnetz → `{ {ip, data}, ... }` |
+| `vs.menu_music(url, dateiname [, titel])` | Datei herunterladen und als Menümusik setzen |
+| `vs.time()` | aktuelle Unix-Zeit |
 | `vs.log(text)` | letzte Meldung erscheint unter Einstellungen → Plugins |
 
 Plugins laufen in einer Sandbox ohne `io`, `os`, `dofile`, `loadfile`. Alle Netzwerkzugriffe gehen über AdBlock und DNS der App.

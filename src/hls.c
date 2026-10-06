@@ -26,7 +26,7 @@ typedef struct {
 struct Hls {
     char     *headers;
     const volatile int *abort_flag;
-    char      media_url[2048];
+    char      media_url[VS_URL_MAX];
     Segment  *seg;
     int       nseg, capseg;
     double    target_duration;
@@ -170,7 +170,7 @@ static int parse_iv(const char *v, uint8_t out[16])
 
 /* ---------------------------------------------------------------- Master */
 
-typedef struct { char uri[2048]; long bw; int w, h; int ok; char audio[64], subs[64]; } Variant;
+typedef struct { char uri[VS_URL_MAX]; long bw; int w, h; int ok; char audio[64], subs[64]; } Variant;
 
 static int pref_matches(const char *lang, const char *name)
 {
@@ -187,14 +187,14 @@ static int pref_matches(const char *lang, const char *name)
 static void choose_audio(Hls *h, const char *text, const char *base, const char *group, const char *sgroup)
 {
     int best_score = -1;
-    char best_uri[2048] = "", best_lang[16] = "";
+    char best_uri[VS_URL_MAX] = "", best_lang[16] = "";
     h->natr = h->nstr = 0;
     h->cur_atr = -1;
     const char *p = text;
     while (*p) {
         const char *eol = p + strcspn(p, "\r\n");
         if (!strncmp(p, "#EXT-X-MEDIA:", 13)) {
-            char line[2048], v[2048], gid[64] = "", type[16] = "";
+            char line[VS_URL_MAX], v[VS_URL_MAX], gid[64] = "", type[16] = "";
             snprintf(line, sizeof line, "%.*s", (int)(eol - p), p + 13);
             attr(line, "TYPE", type, sizeof type);
             attr(line, "GROUP-ID", gid, sizeof gid);
@@ -203,7 +203,7 @@ static void choose_audio(Hls *h, const char *text, const char *base, const char 
             attr(line, "NAME", name, sizeof name);
             for (char *c = lang; *c; c++) *c = (char)tolower((unsigned char)*c);
             int has_uri = attr(line, "URI", v, sizeof v) != NULL;
-            char uri[2048] = "";
+            char uri[VS_URL_MAX] = "";
             if (has_uri) hls_join_url(base, v, uri, sizeof uri);
 
             if (group && !strcmp(type, "AUDIO") && !strcmp(gid, group)) {
@@ -268,7 +268,7 @@ static int choose_variant(Hls *h, const char *text, const char *base, char *out,
                 q += strspn(q, "\r\n");
                 const char *e = q + strcspn(q, "\r\n");
                 if (e > q && *q != '#') {
-                    char ref[2048];
+                    char ref[VS_URL_MAX];
                     snprintf(ref, sizeof ref, "%.*s", (int)(e - q), q);
                     hls_join_url(base, ref, cand.uri, sizeof cand.uri);
                     break;
@@ -316,7 +316,7 @@ static int parse_media(Hls *h, const char *text, const char *base)
     const char *p = text;
     while (*p) {
         const char *eol = p + strcspn(p, "\r\n");
-        char line[2048];
+        char line[VS_URL_MAX];
         snprintf(line, sizeof line, "%.*s", (int)(eol - p), p);
         if (!strncmp(line, "#EXT-X-TARGETDURATION:", 22)) {
             h->target_duration = atof(line + 22);
@@ -332,7 +332,7 @@ static int parse_media(Hls *h, const char *text, const char *base)
         } else if (!strncmp(line, "#EXT-X-ENDLIST", 14)) {
             h->endlist = 1;
         } else if (!strncmp(line, "#EXT-X-KEY:", 11)) {
-            char v[2048], abs_uri[2048];
+            char v[VS_URL_MAX], abs_uri[VS_URL_MAX];
             if (!attr(line + 11, "METHOD", v, sizeof v) || !strcmp(v, "NONE")) {
                 free(h->cur_key_uri);
                 h->cur_key_uri = NULL;
@@ -351,7 +351,7 @@ static int parse_media(Hls *h, const char *text, const char *base)
                 return -1;
             }
         } else if (!strncmp(line, "#EXT-X-MAP:", 11)) {
-            char v[2048], abs_uri[2048];
+            char v[VS_URL_MAX], abs_uri[VS_URL_MAX];
             if (attr(line + 11, "URI", v, sizeof v)) {
                 hls_join_url(base, v, abs_uri, sizeof abs_uri);
                 if (!h->map_uri || strcmp(h->map_uri, abs_uri)) {
@@ -374,7 +374,7 @@ static int parse_media(Hls *h, const char *text, const char *base)
                 h->seg = realloc(h->seg, sizeof(Segment) * h->capseg);
             }
             Segment *s = &h->seg[h->nseg++];
-            char abs_uri[2048];
+            char abs_uri[VS_URL_MAX];
             hls_join_url(base, line, abs_uri, sizeof abs_uri);
             s->uri = strdup(abs_uri);
             s->duration = dur > 0 ? dur : h->target_duration;
@@ -399,7 +399,7 @@ static int parse_media(Hls *h, const char *text, const char *base)
 
 static int load_media(Hls *h)
 {
-    char final_url[2048];
+    char final_url[VS_URL_MAX];
     char *text = fetch(h, h->media_url, NULL, final_url, sizeof final_url);
     if (!text) return -1;
     int r = parse_media(h, text, final_url);
@@ -416,7 +416,7 @@ Hls *hls_open(const char *url, const char *headers, const volatile int *abort_fl
     h->abort_flag = abort_flag;
     snprintf(h->media_url, sizeof h->media_url, "%s", url);
 
-    char final_url[2048];
+    char final_url[VS_URL_MAX];
     char *text = fetch(h, url, NULL, final_url, sizeof final_url);
     if (!text) goto fail;
     if (strncmp(text + strspn(text, " \t\r\n\xEF\xBB\xBF"), "#EXTM3U", 7)) {

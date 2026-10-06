@@ -267,4 +267,5 @@ return {
   actions = actions,
   action = action,
   resolve = m3u.resolve_item,
+  info = m3u.info,
 }

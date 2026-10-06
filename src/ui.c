@@ -170,8 +170,17 @@ void ui_header(const char *title, const char *right)
 static char s_status[256];
 void ui_set_status(const char *s) { snprintf(s_status, sizeof s_status, "%s", s ? s : ""); }
 
+static char s_info[300];
+void ui_set_info(const char *s) { snprintf(s_info, sizeof s_info, "%s", s ? s : ""); }
+
 void ui_footer(const char *hints)
 {
+    if (!s_status[0] && s_info[0]) {
+        /* Zusatzinfo zum gewählten Eintrag (z. B. laufende Sendung) */
+        ui_rect(0, SCREEN_H - 60, SCREEN_W, 26, 0xE0000000);
+        ui_text_clipped(18, SCREEN_H - 41, SCREEN_W - 36, COL_TEXT, s_info);
+    }
+    s_info[0] = 0;                              /* gilt nur für diesen Frame */
     if (s_status[0]) {
         /* Statuszeile (Download, Hintergrundwiedergabe) über der Fußzeile */
         ui_rect(0, SCREEN_H - 60, SCREEN_W, 26, 0xE0000000);

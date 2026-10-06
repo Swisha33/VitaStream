@@ -49,7 +49,12 @@ static void add_cue(SubCue **cues, int *n, int *cap, int64_t a, int64_t b, const
         if (txt[i] == '<') {
             const char *e = memchr(txt + i, '>', len - i);
             if (!e) break;
-            if (!strncasecmp(txt + i, "<br", 3) && j && o[j - 1] != '\n') o[j++] = '\n';
+            /* <br>, <br/>, <tt:br/> -> Zeilenumbruch */
+            const char *tn = txt + i + 1;
+            if (*tn == '/') tn++;
+            const char *colon = memchr(tn, ':', (size_t)(e - tn));
+            const char *nm = (colon && colon < e) ? colon + 1 : tn;
+            if (!strncasecmp(nm, "br", 2) && !isalpha((unsigned char)nm[2]) && j && o[j - 1] != '\n') o[j++] = '\n';
             i = e - txt;
             continue;
         }
@@ -183,22 +188,29 @@ static int parse_ttml(const char *text, SubCue **cues, int *n, int *cap)
     if (tick_rate <= 0) tick_rate = 10000000.0;
     int before = *n;
     const char *p = text;
-    while ((p = strstr(p, "<p")) != NULL) {
-        if (p[2] != ' ' && p[2] != '>' && p[2] != '\n' && p[2] != '\t') { p += 2; continue; }
+    char close_tag[24];
+    /* <p ...> oder mit Namensraum <tt:p ...> (EBU-TT der ARD) */
+    while ((p = strchr(p, '<')) != NULL) {
+        const char *nm = p + 1, *q = nm;
+        while (isalnum((unsigned char)*q)) q++;
+        size_t plen = 0;
+        if (*q == ':') { plen = (size_t)(q - nm) + 1; nm = q + 1; }
+        if (nm[0] != 'p' || (nm[1] != ' ' && nm[1] != '>' && nm[1] != '\n' && nm[1] != '\t' && nm[1] != '\r')) { p++; continue; }
         const char *gt = strchr(p, '>');
         if (!gt) break;
         char b[48] = "", e[48] = "", d[48] = "";
         attr_val(p, gt - p, "begin", b, sizeof b);
         attr_val(p, gt - p, "end", e, sizeof e);
         attr_val(p, gt - p, "dur", d, sizeof d);
-        const char *close = strstr(gt, "</p>");
+        snprintf(close_tag, sizeof close_tag, "</%.*sp>", (int)plen, p + 1);
+        const char *close = strstr(gt, close_tag);
         if (!close) break;
         if (b[0] && (e[0] || d[0])) {
             int64_t a = ttml_time(b, tick_rate);
             int64_t z = e[0] ? ttml_time(e, tick_rate) : a + ttml_time(d, tick_rate);
             if (a >= 0 && z > a) add_cue(cues, n, cap, a, z, gt + 1, close - gt - 1);
         }
-        p = close + 4;
+        p = close + strlen(close_tag);
     }
     /* ZDF & Co. beginnen bei 10:00:00 - auf 0 bringen */
     int64_t minv = INT64_MAX;
@@ -212,7 +224,7 @@ static int parse_ttml(const char *text, SubCue **cues, int *n, int *cap)
 int sub_parse_into(const char *text, int64_t origin_ms, SubCue **cues, int *n, int *cap)
 {
     const char *t = text + strspn(text, " \r\n\t\xEF\xBB\xBF");
-    if (strstr(t, "<tt") && (strstr(t, "<p ") || strstr(t, "<p>"))) return parse_ttml(t, cues, n, cap);
+    if (strstr(t, "<tt") || strstr(t, ":tt ") || strstr(t, ":tt>")) return parse_ttml(t, cues, n, cap);   /* TTML / EBU-TT */
     return parse_vtt(t, origin_ms, cues, n, cap);   /* WebVTT und SRT */
 }
 
@@ -237,12 +249,19 @@ static void set_status(const char *s)
     pthread_mutex_unlock(&S.m);
 }
 
+static char s_fetch_err[96];
+
 static char *fetch(const char *url, char *final_url, int fl)
 {
     NetBuf b;
     long status = 0;
-    if (net_request(url, NULL, S.headers, &b, &status, final_url, fl) != NET_OK) return NULL;
-    if (status >= 400 || !b.data) { net_buf_free(&b); return NULL; }
+    int r = net_request(url, NULL, S.headers, &b, &status, final_url, fl);
+    if (r != NET_OK) { snprintf(s_fetch_err, sizeof s_fetch_err, "%s", net_strerror(r)); return NULL; }
+    if (status >= 400 || !b.data) {
+        snprintf(s_fetch_err, sizeof s_fetch_err, status == 404 || status == 410 ? "nicht mehr verfuegbar (HTTP %ld)" : "HTTP %ld", status);
+        net_buf_free(&b);
+        return NULL;
+    }
     char *t = malloc(b.len + 1);
     if (t) { memcpy(t, b.data, b.len); t[b.len] = 0; }
     net_buf_free(&b);
@@ -256,7 +275,12 @@ static void *loader(void *arg)
     int n = 0, cap = 0;
     char final[1024];
     char *text = fetch(S.url, final, sizeof final);
-    if (!text) { set_status("Untertitel konnten nicht geladen werden"); return NULL; }
+    if (!text) {
+        char m[160];
+        snprintf(m, sizeof m, "Untertitel konnten nicht geladen werden: %s", s_fetch_err);
+        set_status(m);
+        return NULL;
+    }
 
     if (!strncmp(text + strspn(text, " \r\n\xEF\xBB\xBF"), "#EXTM3U", 7)) {
         /* HLS-Untertitel: alle Segmente laden */

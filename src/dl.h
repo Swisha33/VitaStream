@@ -5,6 +5,10 @@
 
 /* 0 = gestartet, -1 = es läuft schon einer, -2 = Ordner/Thread-Fehler */
 int  dl_start(const char *url, const char *headers, const char *title);
+/* wie dl_start, aber in einen anderen Unterordner (z. B. "music") und mit festem Dateinamen */
+int  dl_start_to(const char *url, const char *headers, const char *title, const char *subdir, const char *filename);
+/* 1 = ein Download ist seit dem letzten Aufruf erfolgreich fertig geworden; liefert Unterordner und Dateiname */
+int  dl_take_finished(char *subdir, int sn, char *name, int nn);
 int  dl_active(void);
 void dl_cancel(void);
 /* Kurztext für die Statuszeile ("" = nichts anzuzeigen). Pro Frame aufrufen. */

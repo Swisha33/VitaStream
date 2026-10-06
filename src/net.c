@@ -8,6 +8,12 @@
 #include <string.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <unistd.h>
+#include <strings.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <curl/curl.h>
 
 #ifdef __vita__
@@ -155,11 +161,25 @@ static void note_blocked(const char *host)
 
 /* Prüft Blockliste und löst bei Bedarf über eigenen DNS auf.
  * resolve_entry bekommt "host:port:ip" für CURLOPT_RESOLVE (leer, wenn System-DNS). */
+/* Namen im Heimnetz (Router-DNS): nie an den eigenen DNS-Server (AdGuard kennt sie nicht) */
+static int is_local_name(const char *h)
+{
+    if (!strchr(h, '.')) return 1;                         /* "nas", "jellyfin" */
+    static const char *suf[] = { ".local", ".lan", ".home", ".home.arpa", ".internal", ".fritz.box", ".localdomain", ".box" };
+    size_t hl = strlen(h);
+    for (unsigned i = 0; i < sizeof suf / sizeof *suf; i++) {
+        size_t sl = strlen(suf[i]);
+        if (hl > sl && !strcasecmp(h + hl - sl, suf[i])) return 1;
+    }
+    return 0;
+}
+
 static int prepare_host(const char *url, char *resolve_entry, int len)
 {
     char host[256];
     resolve_entry[0] = 0;
     if (!adblock_host_from_url(url, host, sizeof host)) return NET_ERR;
+    if (is_local_name(host)) return NET_OK;                /* System-DNS / Router */
 
     if (g_cfg.adblock_enabled && adblock_is_blocked(host)) {
         set_detail("%s (Blockliste)", host, 0);
@@ -232,7 +252,12 @@ static void common_opts(CURL *c, const char *url)
     /* Standard: Zertifikatsliste der Vita (vs0:data/external/cert/CA_LIST.cer, im
        curl-Paket voreingestellt). Eine eigene cacert.pem hat Vorrang. */
     if (s_have_ca) curl_easy_setopt(c, CURLOPT_CAINFO, CA_FILE);
-    if (g_cfg.proxy[0]) curl_easy_setopt(c, CURLOPT_PROXY, g_cfg.proxy);
+    if (g_cfg.proxy[0]) {
+        curl_easy_setopt(c, CURLOPT_PROXY, g_cfg.proxy);
+        /* Heimnetz nie über den Proxy (Jellyfin, NAS, Router) */
+        curl_easy_setopt(c, CURLOPT_NOPROXY,
+            "localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,.local,.lan,.home,.fritz.box,.internal");
+    }
     if (!g_cfg.ssl_verify) {
         curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
@@ -245,9 +270,26 @@ int net_request(const char *url_in, const char *post_body, const char *headers,
     return net_request_ex(url_in, post_body, headers, out, status, final_url, final_len, NULL);
 }
 
+static int request_core(const char *url_in, const char *post_body, const char *headers,
+                        NetBuf *out, long *status, char *final_url, int final_len,
+                        const volatile int *abort_flag, int timeout_s);
+
 int net_request_ex(const char *url_in, const char *post_body, const char *headers,
                    NetBuf *out, long *status, char *final_url, int final_len,
                    const volatile int *abort_flag)
+{
+    return request_core(url_in, post_body, headers, out, status, final_url, final_len, abort_flag, 0);
+}
+
+int net_request_to(const char *url_in, const char *post_body, const char *headers,
+                   NetBuf *out, long *status, char *final_url, int final_len, int timeout_s)
+{
+    return request_core(url_in, post_body, headers, out, status, final_url, final_len, NULL, timeout_s);
+}
+
+static int request_core(const char *url_in, const char *post_body, const char *headers,
+                        NetBuf *out, long *status, char *final_url, int final_len,
+                        const volatile int *abort_flag, int timeout_s)
 {
     memset(out, 0, sizeof *out);
     if (status) *status = 0;
@@ -263,6 +305,7 @@ int net_request_ex(const char *url_in, const char *post_body, const char *header
         CURL *c = curl_easy_init();
         if (!c) break;
         common_opts(c, url);
+        if (timeout_s > 0) curl_easy_setopt(c, CURLOPT_TIMEOUT, (long)timeout_s);
 
         struct curl_slist *rl = NULL, *hl = build_headers(headers);
         if (resolve[0]) {
@@ -459,7 +502,7 @@ static int stream_fetch(NetStream *s, uint64_t off, uint64_t want, NetBuf *out, 
 NetStream *net_stream_open(const char *url_in, const char *headers)
 {
     /* Weiterleitungen vorab auflösen, damit Range-Anfragen direkt ans Ziel gehen */
-    char final_url[1024];
+    char final_url[VS_URL_MAX];
     NetBuf probe;
     long st;
     char hdr2[1024];
@@ -815,4 +858,40 @@ int net_download(const char *url_in, const char *headers, const char *path,
     if (result != NET_OK) remove(part);
     free(url);
     return result;
+}
+
+/* ================================================================ Suche im Heimnetz (UDP-Broadcast) */
+
+int net_udp_discover(int port, const char *msg, int timeout_ms, char out[][320], int max)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return 0;
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof yes);
+    struct timeval tv = { 0, 200000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof to);
+    to.sin_family = AF_INET;
+    to.sin_port = htons((unsigned short)port);
+    to.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    sendto(fd, msg, strlen(msg), 0, (struct sockaddr *)&to, sizeof to);
+    int n = 0, waited = 0;
+    while (n < max && waited < timeout_ms) {
+        char buf[600];
+        struct sockaddr_in from;
+        socklen_t fl = sizeof from;
+        int r = (int)recvfrom(fd, buf, sizeof buf - 1, 0, (struct sockaddr *)&from, &fl);
+        if (r > 0) {
+            buf[r] = 0;
+            char ip[32];
+            inet_ntop(AF_INET, &from.sin_addr, ip, sizeof ip);
+            snprintf(out[n], 320, "%s|%.290s", ip, buf);
+            n++;
+        } else {
+            waited += 200;
+        }
+    }
+    close(fd);
+    return n;
 }

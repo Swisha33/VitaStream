@@ -41,6 +41,7 @@ void ui_rect(int x, int y, int w, int h, uint32_t col);
 
 void ui_header(const char *title, const char *right);
 void ui_footer(const char *hints);
+void ui_set_info(const char *s);   /* Infozeile über der Fußzeile, nur für den nächsten ui_footer() */
 /* Statuszeile über der Fußzeile (z. B. Download-Fortschritt); "" = aus */
 void ui_set_status(const char *s);
 

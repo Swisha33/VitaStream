@@ -21,8 +21,8 @@ typedef struct {
     char key[1100];        /* Fortschritts-/Gesehen-Schlüssel */
     char title[256];
     char thumb[512];
-    char url[2048];        /* aufgelöster Stream (bei save_ref-Quellen neu auflösen) */
-    char headers[1024];
+    char url[8192];        /* aufgelöster Stream (bei save_ref-Quellen neu auflösen) */
+    char headers[2048];
     int  save_ref;
 } HistEntry;
 

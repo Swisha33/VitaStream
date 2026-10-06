@@ -24,6 +24,45 @@ int net_check_url(const char *url) {
 const char *net_strerror(int c) { return c == NET_BLOCKED ? "Durch AdBlock gesperrt" : "Netzwerkfehler"; }
 void net_buf_free(NetBuf *b) { free(b->data); b->data = NULL; b->len = 0; }
 const char *net_last_detail(void) { return ""; }
+int net_request(const char *url, const char *post, const char *hdr, NetBuf *out, long *status, char *final_url, int fl);
+static int last_timeout;
+int net_request_to(const char *url, const char *post, const char *hdr, NetBuf *out, long *status, char *final_url, int fl, int t)
+{
+    last_timeout = t;
+    return net_request(url, post, hdr, out, status, final_url, fl);
+}
+/* Programmführer: XMLTV-Dateien für die EPG-Tests */
+#include <time.h>
+#include "../src/epg.h"
+static char dl_urls[1024];
+static void xmltv_time(time_t t, char *o, int n) { struct tm g = *gmtime(&t); strftime(o, n, "%Y%m%d%H%M%S +0000", &g); }
+int net_download(const char *url, const char *h, const char *path, volatile int *a, volatile int64_t *d, volatile int64_t *t)
+{
+    (void)h; (void)a; (void)d; (void)t;
+    snprintf(dl_urls + strlen(dl_urls), sizeof dl_urls - strlen(dl_urls), "%s;", url);
+    const char *chan = NULL, *chid = NULL, *show = NULL;
+    if (strstr(url, "epg.example/a.xml.gz")) { chid = "a"; chan = "Kanal A"; show = "Nachrichten"; }
+    else if (strstr(url, "i.mjh.nz/PlutoTV/de.xml.gz")) { chid = "5f1a"; chan = "Pluto TV Sender 0"; show = "Testshow"; }
+    if (!chan) return NET_ERR;
+    FILE *f = fopen(path, "w");
+    if (!f) return NET_ERR;
+    char a0[32], a1[32], a2[32];
+    time_t now = time(NULL);
+    xmltv_time(now - 600, a0, sizeof a0); xmltv_time(now + 1200, a1, sizeof a1); xmltv_time(now + 3000, a2, sizeof a2);
+    fprintf(f, "<tv><channel id=\"%s\"><display-name>%s</display-name></channel>\n"
+               "<programme start=\"%s\" stop=\"%s\" channel=\"%s\"><title>%s</title></programme>\n"
+               "<programme start=\"%s\" stop=\"%s\" channel=\"%s\"><title>Spaeter</title></programme></tv>\n",
+            chid, chan, a0, a1, chid, show, a1, a2, chid);
+    fclose(f);
+    return NET_OK;
+}
+int net_udp_discover(int port, const char *msg, int timeout_ms, char out[][320], int max)
+{
+    (void)timeout_ms;
+    if (port != 7359 || strcmp(msg, "who is JellyfinServer?") || max < 1) return 0;
+    snprintf(out[0], 320, "192.168.1.50|{\"Address\":\"http://jelly.example:8096\",\"Id\":\"abc\",\"Name\":\"Heimkino\"}");
+    return 1;
+}
 int net_probe(const char *url, const char *headers, int timeout_s, char *info, int infolen)
 {
     (void)headers; (void)timeout_s;
@@ -157,10 +196,11 @@ static int as_reply(const char *url, const char *post, NetBuf *out, long *status
 }
 
 /* --- simulierte Pluto-TV-API --- */
-static int pluto_boots;
+static int pluto_boots, pluto_deny_boot;
 static int pluto_reply(const char *url, const char *hdr, NetBuf *out, long *status) {
     if (strstr(url, "boot.pluto.tv/v4/start")) {
         pluto_boots++;
+        if (pluto_deny_boot) { if (status) *status = 401; return reply(out, "{\"message\":\"Region not supported\"}"); }
         return reply(out, "{\"sessionToken\":\"PTOK\",\"stitcherParams\":\"?appName=web&deviceId=abc\","
                           "\"servers\":{\"stitcher\":\"https://stitcher.pluto.example\"}}");
     }
@@ -172,6 +212,9 @@ static int pluto_reply(const char *url, const char *hdr, NetBuf *out, long *stat
             "\"stitched\":{\"path\":\"https://old.example/v1/stitch/hls/episode/m1/master.m3u8?old=1\"}},"
             "{\"_id\":\"s1\",\"name\":\"Eine Serie\",\"type\":\"series\",\"genre\":\"Krimi\",\"seasonsNumbers\":[1,2]}]},"
             "{\"name\":\"Leer\",\"items\":[]}]}");
+    if (strstr(url, "/v3/vod/series/s2/seasons")) { if (status) *status = 401; return reply(out, "{\"message\":\"use v4\"}"); }
+    if (strstr(url, "service-vod.clusters.pluto.tv/v4/vod/series/s2/seasons"))
+        return reply(out, "{\"seasons\":[{\"number\":1,\"episodes\":[{\"_id\":\"x1\",\"name\":\"Ueber v4\",\"number\":1}]}]}");
     if (strstr(url, "/v3/vod/series/s1/seasons"))
         return reply(out, "{\"name\":\"Eine Serie\",\"seasons\":[{\"number\":2,\"episodes\":[{\"_id\":\"e21\",\"name\":\"Zwei-Eins\",\"number\":1}]},"
             "{\"number\":1,\"episodes\":[{\"_id\":\"e12\",\"name\":\"Zweite\",\"number\":2,\"duration\":1300000},{\"_id\":\"e11\",\"name\":\"Erste\",\"number\":1}]}]}");
@@ -246,6 +289,14 @@ static int yt_reply(const char *url, const char *post, const char *hdr, NetBuf *
 
 /* --- simulierte Website fuer den Explorer --- */
 static int explorer_reply(const char *url, const char *post, NetBuf *out) {
+    /* Seite ohne Suchformular: nur /search?q= liefert Treffer; Videolink als JSON mit \u002F */
+    if (!strcmp(url, "https://next.example/"))
+        return reply(out, "<html><body><a href='/about'>Ueber uns</a></body></html>");
+    if (strstr(url, "next.example/search?q=matrix"))
+        return reply(out, "<html><a href='/watch/matrix-4'>The Matrix 4</a><a href='/about'>Ueber uns</a></html>");
+    if (strstr(url, "next.example/?s=") || strstr(url, "next.example/suche")) return NET_ERR;
+    if (!strcmp(url, "https://next.example/watch/matrix-4"))
+        return reply(out, "<html><script id='__NEXT_DATA__'>{\"props\":{\"video\":\"https:\\u002F\\u002Fcdn.next.example\\u002Fm4\\u002Findex.m3u8\"}}</script></html>");
     /* Startseite mit Suchformular und Inhaltslinks */
     if (!strcmp(url, "https://kino.example/"))
         return reply(out, "<html><head><title>Kino</title></head><body>"
@@ -287,14 +338,32 @@ int net_request(const char *url, const char *post, const char *hdr, NetBuf *out,
         return audio_reply(url, out, status);
     if (strstr(url, "archive.org/advancedsearch.php")) {
         snprintf(last_url, sizeof last_url, "%s", url);
+        if (strstr(url, "netlabels"))
+            return reply(out, "{\"response\":{\"numFound\":1,\"docs\":[{\"identifier\":\"album1\",\"title\":\"8-Bit Album\",\"creator\":\"Chip Band\","
+                "\"licenseurl\":\"https://creativecommons.org/licenses/by-sa/4.0/\"}]}}");
         return reply(out, "{\"response\":{\"numFound\":2,\"docs\":["
             "{\"identifier\":\"notld\",\"title\":\"Night of the Living Dead\",\"year\":\"1968\"},"
             "{\"identifier\":\"his_girl\",\"title\":[\"His Girl Friday\"]}]}}");
     }
     if (strstr(url, "archive.org/metadata/notld"))
-        return reply(out, "{\"files\":[{\"name\":\"notld.ogv\",\"size\":\"100\"},"
-            "{\"name\":\"notld_512kb.mp4\",\"size\":\"3000\"},{\"name\":\"notld.mp4\",\"size\":\"90000\"}]}");
-    if (strstr(url, "kino.example") || strstr(url, "archive.org") || strstr(url, "voe.example"))
+        return reply(out, "{\"metadata\":{\"title\":\"Night of the Living Dead\"},\"files\":["
+            "{\"name\":\"notld.mpeg\",\"source\":\"original\",\"size\":\"900000\"},"
+            "{\"name\":\"notld_512kb.mp4\",\"source\":\"derivative\",\"original\":\"notld.mpeg\",\"size\":\"3000\",\"length\":\"5760.5\"},"
+            "{\"name\":\"notld.mp4\",\"source\":\"derivative\",\"original\":\"notld.mpeg\",\"size\":\"90000\"}]}");
+    if (strstr(url, "archive.org/metadata/album1"))
+        return reply(out, "{\"metadata\":{\"creator\":\"Chip Band\",\"licenseurl\":\"https://creativecommons.org/licenses/by-sa/4.0/\"},\"files\":["
+            "{\"name\":\"02 Level Two.flac\",\"source\":\"original\"},"
+            "{\"name\":\"02 Level Two.mp3\",\"source\":\"derivative\",\"original\":\"02 Level Two.flac\",\"format\":\"VBR MP3\",\"track\":\"2\",\"title\":\"Level Two\",\"length\":\"95\"},"
+            "{\"name\":\"01 Start.mp3\",\"source\":\"original\",\"format\":\"VBR MP3\",\"track\":\"1\",\"title\":\"Start/Menue!\"}]}");
+    if (strstr(url, "archive.org/metadata/serie"))
+        return reply(out, "{\"metadata\":{\"title\":[\"Serie komplett\"]},\"files\":["
+            "{\"name\":\"Staffel 1/Folge 10.mkv\",\"source\":\"original\"},"
+            "{\"name\":\"Staffel 1/Folge 10.mp4\",\"source\":\"derivative\",\"original\":\"Staffel 1/Folge 10.mkv\",\"size\":\"500\"},"
+            "{\"name\":\"Staffel 1/Folge 2.mp4\",\"source\":\"original\",\"size\":\"400\",\"title\":\"Die Zweite\",\"length\":\"00:23:40\"},"
+            "{\"name\":\"Staffel 1/Folge 1.mkv\",\"source\":\"original\"},"
+            "{\"name\":\"Staffel 1/Folge 1.mp4\",\"source\":\"derivative\",\"original\":\"Staffel 1/Folge 1.mkv\",\"size\":\"300\"},"
+            "{\"name\":\"trailer_sample.mp4\",\"source\":\"original\",\"size\":\"1\"}]}");
+    if (strstr(url, "kino.example") || strstr(url, "archive.org") || strstr(url, "voe.example") || strstr(url, "next.example"))
         return explorer_reply(url, post, out);
     if (strstr(url, "jelly.example")) return jelly_reply(url, post, out, status);
     if (strstr(url, "mediathekviewweb")) {
@@ -303,7 +372,7 @@ int net_request(const char *url, const char *post, const char *hdr, NetBuf *out,
     }
     /* eigene Playlist */
     if (strstr(url, "liste.m3u"))
-        return reply(out, "#EXTM3U\r\n#EXTINF:-1 tvg-id=\"a\" tvg-logo=\"https://logo.example/a.png\" group-title=\"News\",Kanal A\r\n"
+        return reply(out, "#EXTM3U url-tvg=\"https://epg.example/a.xml.gz,https://epg.example/b.xml\"\r\n#EXTINF:-1 tvg-id=\"a\" tvg-logo=\"https://logo.example/a.png\" group-title=\"News\",Kanal A\r\n"
                           "#EXTVLCOPT:http-referrer=https://ref.example/\r\nhttps://a.example/a.m3u8\r\n"
                           "#EXTINF:-1 group-title=\"Sport\",Kanal B, mit Komma\nhttps://b.example/b.m3u8\n"
                           "#EXTINF:-1 group-title=\"News\",Kanal C\nhttps://c.example/c.mp4\n");
@@ -433,10 +502,22 @@ int main(void) {
     char ia_cat[64]; snprintf(ia_cat, sizeof ia_cat, "%s", l.count > 1 ? l.items[1].id : "");
     plugins_list_free(&l);
     CHECK(browse(m, ia_cat, &l) == 0 && l.count == 2 && !strcmp(l.items[0].title, "Night of the Living Dead"));
-    CHECK(strstr(last_url, "advancedsearch.php") && strstr(last_url, "English"));
+    CHECK(strstr(last_url, "advancedsearch.php") && strstr(last_url, "English") && !strchr(last_url, ' '));
+    CHECK(l.count && l.items[0].kind == ITEM_FOLDER && l.items[0].thumb && strstr(l.items[0].thumb, "archive.org/services/img/notld"));
+    plugins_list_free(&l);
+    /* Film: eine Fassung (die kleinste MP4) */
+    CHECK(browse(m, "iaitem:notld", &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Night of the Living Dead"));
     if (l.count) {
-        CHECK(l.items[0].thumb && strstr(l.items[0].thumb, "archive.org/services/img/notld"));
+        CHECK(strstr(l.items[0].subtitle, "1:36:00") != NULL);
         CHECK(resolve(m, &l.items[0], &si) == 0 && !strcmp(si.url, "https://archive.org/download/notld/notld_512kb.mp4"));
+    }
+    plugins_list_free(&l);
+    /* Serie: alle Folgen, natuerlich sortiert, ohne Trailer */
+    CHECK(browse(m, "iaitem:serie", &l) == 0 && l.count == 3);
+    for (int i = 0; i < l.count; i++) printf("    IA: %s | %s\n", l.items[i].title, l.items[i].subtitle);
+    if (l.count == 3) {
+        CHECK(strstr(l.items[0].title, "Folge 1") && !strcmp(l.items[1].title, "Die Zweite") && strstr(l.items[2].title, "Folge 10"));
+        CHECK(resolve(m, &l.items[2], &si) == 0 && !strcmp(si.url, "https://archive.org/download/serie/Staffel%201/Folge%2010.mp4"));
     }
     plugins_list_free(&l);
     CHECK(search_ctx(m, "zombie", "iasearch:hr", &l) == 0 && l.count >= 1);
@@ -574,6 +655,23 @@ int main(void) {
     plugins_list_free(&l);
     CHECK(search(f, "sender 12", &l) == 0 && l.count >= 1);
     plugins_list_free(&l);
+    /* Programmführer: Kopf der eigenen Liste (url-tvg) und Pluto-EPG im Finder */
+    CHECK(strstr(dl_urls, "https://epg.example/a.xml.gz;") != NULL);
+    {
+        char info[300] = "";
+        for (int i = 0; i < 300 && !info[0]; i++) {
+            CHECK(browse(f, "list:countries/de.m3u|pluto|0", &l) == 0 && l.count > 0);
+            if (l.count) plugins_item_info(f, &l.items[0], info, sizeof info);
+            if (!info[0]) { plugins_list_free(&l); usleep(10000); }
+        }
+        printf("  EPG: %s | Untertitel: %s | Status: %s\n", info, l.count ? l.items[0].subtitle : "-", epg_status());
+        CHECK(strstr(dl_urls, "i.mjh.nz/PlutoTV/de.xml.gz") != NULL);
+        CHECK(strstr(info, "Jetzt ") && strstr(info, "Testshow") && strstr(info, "Danach") && strstr(info, "Spaeter"));
+        CHECK(l.count && strstr(l.items[0].subtitle, "Jetzt: Testshow (bis "));
+        plugins_list_free(&l);
+        /* Plex: nicht im Verzeichnis -> Erklärung statt leerer Liste */
+        CHECK(browse(f, "list:index.m3u|plex|0", &l) < 0);
+    }
 
     /* ---------- Website-Scanner ---------- */
     int d = find_src("Direkte"); CHECK(d >= 0);
@@ -638,7 +736,11 @@ int main(void) {
     /* ---------- Jellyfin ---------- */
     int jf = find_src("Jellyfin"); CHECK(jf >= 0);
     /* ohne Anmeldung: Schritt 1 (Server) */
-    CHECK(browse(jf, NULL, &l) == 0 && l.count == 1 && l.items[0].kind == ITEM_SEARCH && !strcmp(l.items[0].id, "login_server"));
+    CHECK(browse(jf, NULL, &l) == 0 && l.count == 2 && !strcmp(l.items[0].id, "discover") && l.items[1].kind == ITEM_SEARCH && !strcmp(l.items[1].id, "login_server"));
+    plugins_list_free(&l);
+    /* Server im Heimnetz suchen */
+    CHECK(browse(jf, "discover", &l) == 0 && l.count == 1 && strstr(l.items[0].title, "Heimkino") &&
+          !strcmp(l.items[0].id, "login_user:http://jelly.example:8096") && l.items[0].kind == ITEM_SEARCH);
     plugins_list_free(&l);
     /* Schritt 1: Server ohne Port -> Standard-Port 8096 wird gefunden */
     CHECK(search_ctx(jf, "jelly.example", "login_server", &l) == 0 && l.count == 2);
@@ -692,6 +794,13 @@ int main(void) {
     CHECK(resolve(jf, &l.items[im1], &si) == 0 && strstr(si.url, "/Videos/mov1/stream?static=true") && strstr(si.url, "playSessionId=ps1"));
     CHECK(si.nsubs == 1 && !strcmp(si.sub_url[0], "http://jelly.example:8096/Videos/mov1/mov1/Subtitles/3/0/Stream.vtt?api_key=TOK123"));
     CHECK(resolve(jf, &l.items[im2], &si) == 0 && strstr(si.url, "master.m3u8") && strstr(si.url, "MediaSourceId=src2"));
+    CHECK(last_timeout == 60);                                   /* PlaybackInfo mit langem Zeitlimit */
+    /* Download: Original passt -> Original; sonst Umwandlung in MP4 */
+    plugins_start_download(jf, &l.items[im1]); CHECK(wait_job() == JOB_DONE); plugins_take_stream(&si);
+    CHECK(strstr(si.url, "/Videos/mov1/stream?static=true") != NULL);
+    plugins_start_download(jf, &l.items[im2]); CHECK(wait_job() == JOB_DONE); plugins_take_stream(&si);
+    CHECK(strstr(si.url, "/Videos/mov2/stream.mp4?Static=false&Container=mp4&VideoCodec=h264") != NULL);
+    /* Quellen ohne download(): Download nimmt den Abspielweg */
     plugins_list_free(&l);
     /* Suche auf dem Server */
     CHECK(search(jf, "hevc", &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "Film HEVC"));
@@ -785,7 +894,7 @@ int main(void) {
     plugins_start_resolve_id(yt, "v:vidbot", "Bot");
     CHECK(wait_job() == JOB_ERROR);
     printf("  YouTube-Abweisung: %s\n", plugins_job_error());
-    CHECK(strstr(plugins_job_error(), "not a bot") && strstr(plugins_job_error(), "Anmeldung"));
+    CHECK(strstr(plugins_job_error(), "not a bot") && strstr(plugins_job_error(), "Bot-Pruefung"));
     plugins_job_reset();
     /* gespeicherter Verweis: nur mit id aufloesbar */
     CHECK(plugins_find_source("youtube.lua") == yt);
@@ -822,9 +931,19 @@ int main(void) {
     }
     plugins_list_free(&l);
 
+    /* Pluto: v3 abgelehnt -> v4; Anmeldung abgelehnt -> verstaendliche Meldung */
+    CHECK(browse(pl, "series:s2:1", &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "1. Ueber v4"));
+    plugins_list_free(&l);
+    pluto_deny_boot = 1;
+    CHECK(plugins_reload() == n);
+    pl = find_src("Pluto");
+    CHECK(browse(pl, "catpage:0", &l) < 0);
+    pluto_deny_boot = 0;
+    plugins_job_reset();
+
     /* ---------- Audiothek ---------- */
     int au = find_src("Audiothek"); CHECK(au >= 0);
-    CHECK(browse(au, NULL, &l) == 0 && l.count == 7 && l.items[0].kind == ITEM_SEARCH && l.items[1].kind == ITEM_SEARCH);
+    CHECK(browse(au, NULL, &l) == 0 && l.count == 8 && l.items[0].kind == ITEM_SEARCH && l.items[1].kind == ITEM_SEARCH);
     plugins_list_free(&l);
     CHECK(browse(au, "rc:DE:0", &l) == 0 && l.count == 2);      /* OGG/Opus aussortiert, HLS bleibt */
     CHECK(strstr(last_url, "fi1.api.radio-browser.info") && strstr(last_url, "countrycode=DE") && strstr(last_url, "hidebroken=true"));
@@ -847,6 +966,27 @@ int main(void) {
     }
     plugins_list_free(&l);
     CHECK(browse(au, "podcharts", &l) == 0 && l.count == 2 && !strcmp(l.items[0].title, "Hit 1"));   /* Reihenfolge der Charts */
+    plugins_list_free(&l);
+    /* freie Musik fuer die Menuemusik */
+    CHECK(browse(au, "fm", &l) == 0 && l.count >= 5);
+    plugins_list_free(&l);
+    CHECK(browse(au, "fmc:1:0", &l) == 0 && l.count >= 1 && strstr(last_url, "netlabels") && strstr(last_url, "licenseurl"));
+    plugins_list_free(&l);
+    CHECK(browse(au, "fma:album1", &l) == 0 && l.count == 2);
+    if (l.count == 2) {
+        CHECK(!strcmp(l.items[0].title, "Start/Menue!") && !strcmp(l.items[1].title, "Level Two"));
+        CHECK(strstr(l.items[1].subtitle, "CC BY-SA") && strstr(l.items[1].subtitle, "1:35"));
+        PluginAction ma[4];
+        CHECK(plugins_item_actions(au, &l.items[0], ma, 4) == 1 && !strcmp(ma[0].id, "bgm"));
+        plugins_start_action(au, &l.items[0], "bgm", NULL);
+        CHECK(wait_job() == JOB_DONE);
+        { char m[256]; int r; plugins_take_action_result(m, sizeof m, &r); }
+        char mu[2048], mn[160], mt[160];
+        CHECK(plugins_take_music_request(mu, sizeof mu, mn, sizeof mn, mt, sizeof mt) == 1);
+        printf("  Menuemusik: %s -> %s\n", mn, mu);
+        CHECK(!strcmp(mn, "Chip Band - StartMenue.mp3") && !strcmp(mu, "https://archive.org/download/album1/01%20Start.mp3"));
+        CHECK(plugins_take_music_request(mu, sizeof mu, mn, sizeof mn, mt, sizeof mt) == 0);
+    }
     plugins_list_free(&l);
 
     /* ---------- Downloads ---------- */
@@ -879,8 +1019,16 @@ int main(void) {
     plugins_list_free(&l);
     CHECK(search(as, "gibt es nicht", &l) < 0);
 
+    /* Explorer: geratene Such-Adresse und Video in JSON-Daten */
+    CHECK(search_ctx(ex, "matrix", "site:https://next.example/", &l) == 0 && l.count == 1 && !strcmp(l.items[0].title, "The Matrix 4"));
+    plugins_list_free(&l);
+    CHECK(browse(ex, "page:https://next.example/watch/matrix-4", &l) == 0 && l.count >= 1);
+    if (l.count) CHECK(!strcmp(l.items[0].id, "https://cdn.next.example/m4/index.m3u8"));
+    plugins_list_free(&l);
+
     CHECK(plugins_reload() == n);
     plugins_shutdown();
+    epg_shutdown();
     printf(fails ? "%d Fehler\n" : "plugins: alle Tests ok\n", fails);
     return fails != 0;
 }

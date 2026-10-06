@@ -1,6 +1,8 @@
 #ifndef VS_PLUGINS_H
 #define VS_PLUGINS_H
 
+#include "net.h"
+
 /* Quellen-Plugins in Lua (ux0:data/VitaStream/plugins/, Endung .lua).
  * Ein Plugin gibt eine Quelle (Tabelle) oder eine Liste von Quellen zurück:
  *
@@ -48,12 +50,12 @@ typedef struct {
 
 #define MAX_STREAM_SUBS 4
 typedef struct {
-    char url[2048];
-    char headers[1024];  /* durch '\n' getrennt */
+    char url[VS_URL_MAX];
+    char headers[2048];  /* durch '\n' getrennt */
     /* vom Plugin gelieferte Untertitel: resolve -> { url=..., subtitles = { {label=..., url=...}, ... } } */
     int  nsubs;
     char sub_label[MAX_STREAM_SUBS][48];
-    char sub_url[MAX_STREAM_SUBS][1024];
+    char sub_url[MAX_STREAM_SUBS][4096];
 } StreamInfo;
 
 int     plugins_init(void);      /* lädt alle Plugins, gibt Anzahl Quellen zurück */
@@ -63,6 +65,10 @@ int     plugins_reload(void);
 int     plugins_source_count(void);
 Source *plugins_source(int idx);
 int     plugins_find_source(const char *file);          /* Index der Quelle zu "youtube.lua" oder -1 */
+/* wie Abspielen, nutzt aber download(item) des Plugins, falls vorhanden (Ergebnis wie resolve) */
+int     plugins_start_download(int src, const PluginItem *it);
+/* Plugin hat vs.menu_music(...) aufgerufen: 1 + Daten (einmalig) */
+int     plugins_take_music_request(char *url, int ul, char *name, int nl, char *title, int tl);
 /* Eintrag nur anhand seiner id auflösen (gespeicherte Verweise "vsplugin://datei/id") */
 int     plugins_start_resolve_id(int src, const char *id, const char *title);
 
@@ -99,6 +105,8 @@ typedef struct {
 } PluginAction;
 
 int  plugins_item_actions(int src, const PluginItem *it, PluginAction *out, int max);
+/* Zusatzinfo (Plugin-Funktion info(item), z. B. "Jetzt: ... · Danach: ..."); 0 = keine */
+int  plugins_item_info(int src, const PluginItem *it, char *out, int n);
 int  plugins_start_action(int src, const PluginItem *it, const char *action_id, const char *input);
 int  plugins_take_action_result(char *msg, int msglen, int *refresh);
 

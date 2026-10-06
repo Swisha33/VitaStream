@@ -26,17 +26,28 @@ local LANGS = {
   { "kor", "Koreanisch" }, { "hrv", "Kroatisch" }, { "srp", "Serbisch" }, { "ell", "Griechisch" },
 }
 
--- Kostenlose (werbefinanzierte) Dienste, die in den Listen enthalten sind
+-- Kostenlose (werbefinanzierte) Dienste, die in den Listen enthalten sind.
+-- (Zattoo und waipu.tv fehlen bewusst: deren Gratis-Sender brauchen ein Konto und sind kopiergeschuetzt.)
 local SERVICES = {
   { "Pluto TV", "pluto" }, { "Samsung TV Plus", "samsung" }, { "Rakuten TV", "rakuten" },
-  { "Plex", "plex" }, { "Zattoo/Waipu Free", "waipu" },
+  { "Plex", "plex" }, { "LG Channels", "lgchannels" }, { "Roku Channel", "roku" },
+}
+
+-- Programmfuehrer (XMLTV) der Dienste von i.mjh.nz (aus den offiziellen, oeffentlichen Senderlisten erzeugt)
+local MJH = "https://i.mjh.nz/"
+local SERVICE_EPG = {
+  pluto   = { de = MJH .. "PlutoTV/de.xml.gz",       all = MJH .. "PlutoTV/all.xml.gz" },
+  samsung = { de = MJH .. "SamsungTVPlus/de.xml.gz", all = MJH .. "SamsungTVPlus/all.xml.gz" },
+  roku    = { de = MJH .. "Roku/all.xml.gz",         all = MJH .. "Roku/all.xml.gz" },
+  plex    = { de = MJH .. "Plex/all.xml.gz",         all = MJH .. "Plex/all.xml.gz" },
 }
 
 local function folder(title, id, sub) return { title = title, id = id, kind = "folder", subtitle = sub } end
 
 -- Liste laden und optional filtern (Text in Titel oder URL)
 local function list_for(path, filter)
-  local entries, err = m3u.load(BASE .. path)
+  local epg = SERVICE_EPG[filter or ""]
+  local entries, err = m3u.load(BASE .. path, epg and (path == "index.m3u" and epg.all or epg.de) or nil)
   if not entries then return nil, err end
   if not filter or filter == "" then return entries end
   local out, f = {}, filter:lower()
@@ -49,7 +60,16 @@ end
 local function show(path, filter, offset)
   local list, err = list_for(path, filter)
   if not list then return nil, err end
-  if #list == 0 then return nil, "Keine Sender gefunden" end
+  if #list == 0 then
+    if filter and filter ~= "" then
+      if path == "index.m3u" then
+        return nil, "Im freien Verzeichnis (iptv-org) sind derzeit keine \"" .. filter .. "\"-Sender enthalten. " ..
+                    "Der Dienst gibt seine Streams nur noch an die eigene App heraus."
+      end
+      return nil, "Keine \"" .. filter .. "\"-Sender in dieser Liste. Versuche die Variante \"weltweit\"."
+    end
+    return nil, "Keine Sender gefunden"
+  end
   return m3u.page(list, offset, PAGE, function(n)
     return "list:" .. path .. "|" .. (filter or "") .. "|" .. n
   end)
@@ -79,7 +99,9 @@ return {
       for _, s in ipairs(SERVICES) do
         items[#items + 1] = folder(s[1] .. " (Deutschland)", "list:countries/de.m3u|" .. s[2] .. "|0")
         items[#items + 1] = folder(s[1] .. " (deutschsprachig)", "list:languages/deu.m3u|" .. s[2] .. "|0")
+        items[#items + 1] = folder(s[1] .. " (weltweit)", "list:index.m3u|" .. s[2] .. "|0", "alle Laender - grosse Liste, laedt etwas laenger")
       end
+      items[#items + 1] = folder("Zattoo / waipu.tv", "nosvc", "nicht moeglich: Konto noetig und kopiergeschuetzt")
       return items
     end
 
@@ -123,6 +145,10 @@ return {
       return items
     end
 
+    if id == "nosvc" then
+      return nil, "Zattoo und waipu.tv liefern ihre Gratis-Sender nur mit Konto und Kopierschutz (Widevine) - " ..
+                  "das kann die Vita nicht abspielen. Viele dieser Sender gibt es aber frei unter \"Deutschland\"."
+    end
     local path, filter, off = id:match("^list:([^|]+)|([^|]*)|(%d+)$")
     if path then return show(path, filter, tonumber(off)) end
     return nil, "Unbekannter Eintrag"
@@ -147,4 +173,5 @@ return {
   end,
 
   resolve = m3u.resolve_item,
+  info = m3u.info,
 }

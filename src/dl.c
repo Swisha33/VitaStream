@@ -21,6 +21,8 @@ static struct {
     char            *url, *headers;
     int              show_frames;     /* Ergebnis noch so lange anzeigen */
     char             err[160];        /* Fehlerdetail aus dem Download-Thread */
+    char             subdir[32], fname[200];
+    int              finished_unseen;
     char             status[200];
 } D;
 
@@ -50,30 +52,52 @@ static void *worker(void *arg)
     (void)arg;
     D.result = net_download(D.url, D.headers, D.path, &D.abort, &D.done, &D.total);
     snprintf(D.err, sizeof D.err, "%s", net_last_detail());   /* Detail ist pro Thread */
+    if (D.result == NET_OK) D.finished_unseen = 1;
     D.running = 0;
     return NULL;
 }
 
-int dl_start(const char *url, const char *headers, const char *title)
+int dl_start_to(const char *url, const char *headers, const char *title, const char *subdir, const char *filename)
 {
     if (D.running) return -1;
     if (D.started) { pthread_join(D.t, NULL); D.started = 0; }
     free(D.url); free(D.headers);
-    mkdir(VS_DATA_DIR "/downloads", 0777);
+    if (!subdir || !*subdir || strstr(subdir, "..") || strchr(subdir, '/')) subdir = "downloads";
+    char dir[300];
+    snprintf(dir, sizeof dir, VS_DATA_DIR "/%s", subdir);
+    mkdir(dir, 0777);
     char name[200];
-    dl_filename(title, url, name, sizeof name);
-    snprintf(D.path, sizeof D.path, VS_DATA_DIR "/downloads/%s", name);
+    if (filename && *filename && !strstr(filename, "..") && !strchr(filename, '/')) snprintf(name, sizeof name, "%s", filename);
+    else dl_filename(title, url, name, sizeof name);
+    snprintf(D.path, sizeof D.path, "%s/%s", dir, name);
+    snprintf(D.subdir, sizeof D.subdir, "%s", subdir);
+    snprintf(D.fname, sizeof D.fname, "%s", name);
     snprintf(D.title, sizeof D.title, "%s", title);
     D.url = strdup(url);
     D.headers = headers && *headers ? strdup(headers) : NULL;
     D.abort = 0;
     D.done = D.total = 0;
     D.result = NET_ERR;
+    D.finished_unseen = 0;
     D.running = 1;
     D.show_frames = 360;
     if (pthread_create(&D.t, NULL, worker, NULL) != 0) { D.running = 0; return -2; }
     D.started = 1;
     return 0;
+}
+
+int dl_start(const char *url, const char *headers, const char *title)
+{
+    return dl_start_to(url, headers, title, "downloads", NULL);
+}
+
+int dl_take_finished(char *subdir, int sn, char *name, int nn)
+{
+    if (D.running || !D.finished_unseen) return 0;
+    D.finished_unseen = 0;
+    snprintf(subdir, sn, "%s", D.subdir);
+    snprintf(name, nn, "%s", D.fname);
+    return 1;
 }
 
 int  dl_active(void) { return D.running; }
@@ -93,7 +117,8 @@ const char *dl_status(void)
     }
     if (D.started && D.show_frames > 0) {
         if (D.show_frames == 360) {
-            if (D.result == NET_OK) snprintf(D.status, sizeof D.status, "Download fertig: %s (Quelle \"Downloads\")", D.title);
+            if (D.result == NET_OK && !strcmp(D.subdir, "music")) snprintf(D.status, sizeof D.status, "Menuemusik geladen: %s", D.title);
+            else if (D.result == NET_OK) snprintf(D.status, sizeof D.status, "Download fertig: %s (Quelle \"Downloads\")", D.title);
             else if (D.result == NET_ABORTED) snprintf(D.status, sizeof D.status, "Download abgebrochen");
             else snprintf(D.status, sizeof D.status, "Download fehlgeschlagen: %s", D.err[0] ? D.err : "Netzwerkfehler");
         }

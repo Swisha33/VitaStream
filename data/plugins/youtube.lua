@@ -18,7 +18,8 @@ local WEB = { clientName = "WEB", clientVersion = "2.20260901.01.00", hl = HL, g
               timeZone = "Europe/Berlin", utcOffsetMinutes = 120 }
 local WEB_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36"
 
-local VISION_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15"
+-- vollstaendige Safari-Kennung: googlevideo liefert die Segmente nur zur passenden Kennung aus
+local VISION_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
 -- vollstaendiger Kontext (inkl. userAgent): ein knapper Kontext wird eher mit LOGIN_REQUIRED abgewiesen
 local VISION = { clientName = "VISIONOS", clientVersion = "1.02", deviceMake = "Apple",
                  deviceModel = "RealityDevice17,1", userAgent = VISION_UA, osName = "visionOS",
@@ -367,14 +368,23 @@ return {
           if not best or (tonumber(f.height) or 0) > (tonumber(best.height) or 0) then best = f end
         end
       end
-      if best then return { url = best.url, headers = { ["User-Agent"] = ANDROID_UA } } end
-      why(data.playabilityStatus)
+      if best then
+        -- YouTube sperrt diese Dateien inzwischen oft (HTTP 403): vorher kurz pruefen
+        local ok, info = vs.probe(best.url, "User-Agent: " .. ANDROID_UA)
+        if ok then return { url = best.url, headers = { ["User-Agent"] = ANDROID_UA } } end
+        reasons[#reasons + 1] = "Ersatzdatei gesperrt (" .. tostring(info) .. ")"
+      else
+        why(data.playabilityStatus)
+      end
     end
 
     local msg = #reasons > 0 and table.concat(reasons, " / ") or "kein abspielbarer Stream"
-    if msg:find("LOGIN_REQUIRED") or msg:lower():find("bot") or msg:find("anmelden") or msg:find("Sign in") then
-      msg = msg .. "  -  YouTube verlangt hier eine Anmeldung (Altersfreigabe oder Bot-Pruefung). " ..
-            "Oft hilft es, kurz zu warten und es erneut zu versuchen."
+    local low = msg:lower()
+    if low:find("age") or low:find("alter") or low:find("inappropriate") or low:find("jugend") then
+      msg = msg .. "  -  Altersbeschraenktes Video: YouTube zeigt es nur angemeldeten, volljaehrigen Nutzern. " ..
+            "Das kann die App nicht (die Anmeldung wuerde einen anderen, deutlich aufwendigeren Abspielweg erfordern)."
+    elseif msg:find("LOGIN_REQUIRED") or low:find("bot") or msg:find("anmelden") or msg:find("Sign in") then
+      msg = msg .. "  -  YouTube verlangt eine Bot-Pruefung. Meist hilft es, kurz zu warten und es erneut zu versuchen."
     end
     return nil, "YouTube: " .. msg
   end,
